@@ -1,0 +1,76 @@
+Create a responsive lead generation application that supports multiple user roles, each with a different dashboard and set of routes. The roles are as follows:
+
+Role 1: Admin
+The admin has full access to the system. The admin dashboard includes an overview of total users, total support tickets, total leads, and active subscription plans. Admins can manage everything in the system, including creating and assigning subadmins.
+
+Admin Modules include:
+
+Dashboard Overview – Total users, leads, support tickets, and subscriptions
+
+User Management – View all users with details (email, name, password, status, verification)
+
+Leads Management – Full CRUD operations on all leads
+
+Support Management – View and manage user support tickets
+
+Subscription Management – Create and manage all subscription plans
+
+Subadmin Management –
+
+Create subadmins by assigning email and password
+
+Assign module access permissions (user, leads, support, subscriptions)
+
+Edit or delete subadmins
+
+Profile Update – Update admin's personal details
+
+Reset Password – Change admin account password
+
+LeadCoin Management – Admin can set that one leadcoin will be charged when a user views a lead and its contact information. If a user has no leadcoins left in their current plan, they will not be able to view the lead.
+
+Role 2: Subadmin (Employee of Admin)
+Subadmins are created by the admin with custom permissions. They can access only those modules assigned to them.
+
+Subadmin Capabilities:
+
+User Management – View list of users with fields such as email, name, password, status, and verification
+
+Leads Management – Full CRUD operations on leads (title, description, location, price, total members, images, email, contact number)
+
+Support Management – View and resolve support issues (if permission is granted by the admin)
+
+Subscription Management – Manage plans. Two types are supported:
+
+Plans with expiration time and lead coins
+
+Plans for purchasing only lead coins (if user has none left)
+
+Subadmin Modules include:
+
+User Management
+
+Subscriptions
+
+Leads
+
+Profile Update
+
+Reset Password
+
+Role 3: User
+Users can register by verifying a 4-digit OTP sent to their email. Once verified, users can access their dashboard to see total leads, subscription plans, and their current active plan.
+
+User Modules include:
+
+Leads – List and view details (viewing contact information of a lead will deduct one leadcoin; if the user has no coins left, the lead cannot be viewed)
+
+Subscription Plans – View available plans
+
+Support – Create, read, update, and delete support tickets
+
+Profile – Update profile image and name
+
+Change Password
+
+The application will be fully integrated with a database, storing all user data, leads, subscriptions, and support records securely, while maintaining proper access control and relationships between different roles

@@ -1,0 +1,1014 @@
+{
+	"info": {
+		"_postman_id": "d5cef745-7b03-4c40-9a5e-f90d58b9d0a9",
+		"name": "Lead Generation Platform API",
+		"description": "A collection of API endpoints for the Lead Generation Platform",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Login",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"admin123@leadgen.com\",\n    \"password\": \"admin123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/login",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"login"
+							]
+						},
+						"description": "Login with email and password"
+					},
+					"response": []
+				},
+				{
+					"name": "Register",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"New User\",\n    \"email\": \"newuser@example.com\",\n    \"password\": \"password123\",\n    \"confirmPassword\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/register",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"register"
+							]
+						},
+						"description": "Register a new user"
+					},
+					"response": []
+				},
+				{
+					"name": "Verify Account",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"newuser@example.com\",\n    \"code\": \"1234\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/verify",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"verify"
+							]
+						},
+						"description": "Verify account with verification code"
+					},
+					"response": []
+				},
+				{
+					"name": "Resend Verification Code",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"newuser@example.com\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/resend-code",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"resend-code"
+							]
+						},
+						"description": "Resend verification code to email"
+					},
+					"response": []
+				},
+				{
+					"name": "Request Password Reset",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"user123@leadgen.com\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/forgot-password",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"forgot-password"
+							]
+						},
+						"description": "Request password reset token"
+					},
+					"response": []
+				},
+				{
+					"name": "Reset Password",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"user123@leadgen.com\",\n    \"token\": \"resetToken123\",\n    \"password\": \"newpassword123\",\n    \"confirmPassword\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/reset-password",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"reset-password"
+							]
+						},
+						"description": "Reset password with token"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Current User",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/auth/me",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"me"
+							]
+						},
+						"description": "Get current authenticated user"
+					},
+					"response": []
+				},
+				{
+					"name": "Logout",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/auth/logout",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"logout"
+							]
+						},
+						"description": "Logout current user"
+					},
+					"response": []
+				}
+			],
+			"description": "Authentication related endpoints"
+		},
+		{
+			"name": "Users",
+			"item": [
+				{
+					"name": "Get All Users",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/users",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users"
+							]
+						},
+						"description": "Get all users (admin only)"
+					},
+					"response": []
+				},
+				{
+					"name": "Get User by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/users/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users",
+								"1"
+							]
+						},
+						"description": "Get user by ID"
+					},
+					"response": []
+				},
+				{
+					"name": "Update User Profile",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Updated Name\",\n    \"profile_image\": \"profile.jpg\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/users/profile",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users",
+								"profile"
+							]
+						},
+						"description": "Update user profile"
+					},
+					"response": []
+				},
+				{
+					"name": "Change Password",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"currentPassword\": \"user123\",\n    \"newPassword\": \"newpassword123\",\n    \"confirmPassword\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/users/password",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users",
+								"password"
+							]
+						},
+						"description": "Change user password"
+					},
+					"response": []
+				},
+				{
+					"name": "Delete User",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/users/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users",
+								"1"
+							]
+						},
+						"description": "Delete user (admin only)"
+					},
+					"response": []
+				}
+			],
+			"description": "User management endpoints"
+		},
+		{
+			"name": "Leads",
+			"item": [
+				{
+					"name": "Get All Leads",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/leads",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"leads"
+							]
+						},
+						"description": "Get all leads"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Lead by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/leads/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"leads",
+								"1"
+							]
+						},
+						"description": "Get lead by ID"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Lead",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"New Lead\",\n    \"description\": \"Description of the lead\",\n    \"location\": \"New York\",\n    \"email\": \"lead@example.com\",\n    \"contact_number\": \"123-456-7890\",\n    \"price\": 1000,\n    \"total_members\": 5\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/leads",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"leads"
+							]
+						},
+						"description": "Create new lead"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Lead",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Updated Lead\",\n    \"price\": 1500\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/leads/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"leads",
+								"1"
+							]
+						},
+						"description": "Update lead"
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Lead",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/leads/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"leads",
+								"1"
+							]
+						},
+						"description": "Delete lead"
+					},
+					"response": []
+				},
+				{
+					"name": "View Lead",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"leadId\": 1\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/leads/view",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"leads",
+								"view"
+							]
+						},
+						"description": "Mark lead as viewed by user"
+					},
+					"response": []
+				}
+			],
+			"description": "Lead management endpoints"
+		},
+		{
+			"name": "Subscriptions",
+			"item": [
+				{
+					"name": "Get All Subscriptions",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/subscriptions",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subscriptions"
+							]
+						},
+						"description": "Get all subscription plans"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Subscription by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/subscriptions/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subscriptions",
+								"1"
+							]
+						},
+						"description": "Get subscription by ID"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Subscription",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"New Plan\",\n    \"description\": \"Description of the plan\",\n    \"price\": 19.99,\n    \"duration_days\": 30,\n    \"lead_coins\": 100,\n    \"features\": [\"Feature 1\", \"Feature 2\"],\n    \"active\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/subscriptions",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subscriptions"
+							]
+						},
+						"description": "Create new subscription plan"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Subscription",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"price\": 24.99,\n    \"lead_coins\": 120\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/subscriptions/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subscriptions",
+								"1"
+							]
+						},
+						"description": "Update subscription plan"
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Subscription",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/subscriptions/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subscriptions",
+								"1"
+							]
+						},
+						"description": "Delete subscription plan"
+					},
+					"response": []
+				},
+				{
+					"name": "Subscribe to Plan",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"subscriptionId\": 1\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/user-subscriptions",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"user-subscriptions"
+							]
+						},
+						"description": "Subscribe user to a plan"
+					},
+					"response": []
+				},
+				{
+					"name": "Get User Subscription",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/user-subscriptions/current",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"user-subscriptions",
+								"current"
+							]
+						},
+						"description": "Get current user's subscription"
+					},
+					"response": []
+				}
+			],
+			"description": "Subscription management endpoints"
+		},
+		{
+			"name": "Support",
+			"item": [
+				{
+					"name": "Get All Support Tickets",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/support",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"support"
+							]
+						},
+						"description": "Get all support tickets (admin/subadmin only)"
+					},
+					"response": []
+				},
+				{
+					"name": "Get User Support Tickets",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/support/my-tickets",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"support",
+								"my-tickets"
+							]
+						},
+						"description": "Get current user's support tickets"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Support Ticket by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/support/1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"support",
+								"1"
+							]
+						},
+						"description": "Get support ticket by ID"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Support Ticket",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Help Request\",\n    \"description\": \"I need help with my account\",\n    \"priority\": \"medium\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/support",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"support"
+							]
+						},
+						"description": "Create new support ticket"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Ticket Status",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"status\": \"in_progress\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/support/1/status",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"support",
+								"1",
+								"status"
+							]
+						},
+						"description": "Update support ticket status"
+					},
+					"response": []
+				},
+				{
+					"name": "Add Reply to Ticket",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"message\": \"This is my reply to the ticket\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/support/1/reply",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"support",
+								"1",
+								"reply"
+							]
+						},
+						"description": "Add a reply to support ticket"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Ticket Replies",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/support/1/replies",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"support",
+								"1",
+								"replies"
+							]
+						},
+						"description": "Get all replies for a support ticket"
+					},
+					"response": []
+				}
+			],
+			"description": "Support ticket management endpoints"
+		},
+		{
+			"name": "Subadmins",
+			"item": [
+				{
+					"name": "Get All Subadmins",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/subadmins",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subadmins"
+							]
+						},
+						"description": "Get all subadmins (admin only)"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Subadmin",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"New Subadmin\",\n    \"email\": \"subadmin@example.com\",\n    \"password\": \"password123\",\n    \"permissions\": [\"manage_users\", \"manage_leads\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/subadmins",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subadmins"
+							]
+						},
+						"description": "Create a new subadmin"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Subadmin Permissions",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"permissions\": [\"manage_users\", \"manage_leads\", \"view_reports\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/subadmins/1/permissions",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"subadmins",
+								"1",
+								"permissions"
+							]
+						},
+						"description": "Update subadmin permissions"
+					},
+					"response": []
+				}
+			],
+			"description": "Subadmin management endpoints"
+		},
+		{
+			"name": "LeadCoins",
+			"item": [
+				{
+					"name": "Get LeadCoin Settings",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/lead-coins/settings",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"lead-coins",
+								"settings"
+							]
+						},
+						"description": "Get current LeadCoin settings"
+					},
+					"response": []
+				},
+				{
+					"name": "Update LeadCoin Settings",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"viewCost\": 10,\n    \"creationReward\": 20,\n    \"conversionRate\": 0.01\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/lead-coins/settings",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"lead-coins",
+								"settings"
+							]
+						},
+						"description": "Update LeadCoin settings (admin only)"
+					},
+					"response": []
+				}
+			],
+			"description": "LeadCoin settings management"
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "https://your-replit-app.replit.app",
+			"type": "string",
+			"description": "Base URL of the API"
+		}
+	]
+}

@@ -1,0 +1,125 @@
+import { Switch, Route, Router } from "wouter";
+import { queryClient } from "./lib/queryClient";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthProvider, useAuth } from "./contexts/auth-context";
+
+// Auth Pages
+import Login from "@/pages/login";
+import Register from "@/pages/register";
+import Verify from "@/pages/verify";
+import ResetPassword from "@/pages/reset-password";
+
+// Admin Pages
+import AdminDashboard from "@/pages/admin/dashboard";
+import AdminUsers from "@/pages/admin/users";
+import AdminLeads from "@/pages/admin/leads";
+import AdminSupport from "@/pages/admin/support";
+import AdminSubscriptions from "@/pages/admin/subscriptions";
+import AdminSubadmins from "@/pages/admin/subadmins";
+import AdminLeadcoins from "@/pages/admin/leadcoins";
+import AdminProfile from "@/pages/admin/profile";
+
+// Subadmin Pages
+import SubadminDashboard from "@/pages/subadmin/dashboard";
+import SubadminUsers from "@/pages/subadmin/users";
+import SubadminLeads from "@/pages/subadmin/leads";
+import SubadminSupport from "@/pages/subadmin/support";
+import SubadminSubscriptions from "@/pages/subadmin/subscriptions";
+import SubadminProfile from "@/pages/subadmin/profile";
+
+// User Pages
+import UserDashboard from "@/pages/user/dashboard";
+import UserLeads from "@/pages/user/leads";
+import UserSubscriptions from "@/pages/user/subscriptions";
+import UserSupport from "@/pages/user/support";
+import UserProfile from "@/pages/user/profile";
+
+// Other
+import NotFound from "@/pages/not-found";
+
+function AppRoutes() {
+  const { user, isLoading } = useAuth();
+
+  if (isLoading) return <div>Loading...</div>;
+
+  if (!user) {
+    return (
+      <Switch>
+        <Route path="/" component={Login} />
+        <Route path="/login" component={Login} />
+        <Route path="/register" component={Register} />
+        <Route path="/verify" component={Verify} />
+        <Route path="/reset-password" component={ResetPassword} />
+        <Route component={Login} />
+      </Switch>
+    );
+  }
+
+  if (user.role === "admin") {
+    return (
+      <Switch>
+        <Route path="/" component={AdminDashboard} />
+        <Route path="/admin/dashboard" component={AdminDashboard} />
+        <Route path="/admin/users" component={AdminUsers} />
+        <Route path="/admin/leads" component={AdminLeads} />
+        <Route path="/admin/support" component={AdminSupport} />
+        <Route path="/admin/subscriptions" component={AdminSubscriptions} />
+        <Route path="/admin/subadmins" component={AdminSubadmins} />
+        <Route path="/admin/leadcoins" component={AdminLeadcoins} />
+        <Route path="/admin/profile" component={AdminProfile} />
+        <Route component={NotFound} />
+      </Switch>
+    );
+  }
+
+  if (user.role === "subadmin") {
+    return (
+      <Switch>
+        <Route path="/" component={SubadminDashboard} />
+        <Route path="/subadmin/dashboard" component={SubadminDashboard} />
+        <Route path="/subadmin/users" component={SubadminUsers} />
+        <Route path="/subadmin/leads" component={SubadminLeads} />
+        <Route path="/subadmin/support" component={SubadminSupport} />
+        <Route
+          path="/subadmin/subscriptions"
+          component={SubadminSubscriptions}
+        />
+        <Route path="/subadmin/profile" component={SubadminProfile} />
+        <Route component={NotFound} />
+      </Switch>
+    );
+  }
+
+  if (user.role === "user") {
+    return (
+      <Switch>
+        <Route path="/" component={UserDashboard} />
+        <Route path="/user/dashboard" component={UserDashboard} />
+        <Route path="/user/leads" component={UserLeads} />
+        <Route path="/user/subscriptions" component={UserSubscriptions} />
+        <Route path="/user/support" component={UserSupport} />
+        <Route path="/user/profile" component={UserProfile} />
+        <Route component={NotFound} />
+      </Switch>
+    );
+  }
+
+  return <NotFound />;
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <AuthProvider>
+          <AppRoutes />
+          <Toaster />
+        </AuthProvider>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+
+export default App;

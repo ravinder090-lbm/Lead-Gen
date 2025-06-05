@@ -1,0 +1,3198 @@
+import express, { type Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { mailer } from "./mailer";
+import { notifyInactiveUsers } from "./scheduled-tasks";
+import { generateOTP } from "../client/src/lib/utils";
+import bcrypt from "bcrypt";
+import session from "express-session";
+import MemoryStore from "memorystore";
+import { randomBytes } from "crypto";
+import { db } from "./db";
+import { eq, and, lte, gt } from "drizzle-orm";
+import {
+  createSubscriptionPaymentSession,
+  verifyPaymentSession,
+  processStripeWebhook,
+} from "./stripe-service";
+
+import { z } from "zod";
+import {
+  User,
+  Lead,
+  LeadCategory,
+  SupportTicket,
+  Subscription,
+  LeadCoinSetting,
+  userSubscriptions,
+  viewedLeads,
+  insertUserSchema,
+  loginUserSchema,
+  verifyUserSchema,
+  updateUserProfileSchema,
+  changePasswordSchema,
+  insertLeadSchema,
+  insertLeadCategorySchema,
+  insertSubscriptionSchema,
+  insertSupportTicketSchema,
+  insertSupportTicketReplySchema,
+  updateLeadCoinSettingsSchema,
+  updateLeadCategorySchema,
+  createSubadminSchema,
+} from "@shared/schema";
+
+// Helper function to convert array of objects to CSV
+function convertToCSV(arr: Record<string, any>[]): string {
+  if (!arr || !arr.length) return '';
+  
+  const header = Object.keys(arr[0]).join(',');
+  const rows = arr.map((obj: Record<string, any>) => {
+    return Object.values(obj).map((value: any) => {
+      // Handle special cases: null, undefined, objects, and strings with commas
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'object') {
+        if (value instanceof Date) {
+          return `"${value.toISOString()}"`;
+        }
+        try {
+          return `"${JSON.stringify(value).replace(/"/g, '""')}"`;
+        } catch (e) {
+          return '""';
+        }
+      }
+      if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
+        return `"${value.replace(/"/g, '""')}"`;
+      }
+      return value;
+    }).join(',');
+  }).join('\n');
+  
+  return header + '\n' + rows;
+}
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  const httpServer = createServer(app);
+
+  // Configure raw body parsing for Stripe webhooks
+  const rawBodyParser = express.raw({ type: "application/json" });
+
+  // Setup session middleware
+  const SessionStore = MemoryStore(session);
+  app.use(
+    session({
+      name: "leadgen.sid",
+      secret: process.env.SESSION_SECRET || "leadgen-session-secret",
+      resave: false,
+      saveUninitialized: false,
+      store: new SessionStore({
+        checkPeriod: 86400000, // prune expired entries every 24h
+      }),
+      cookie: {
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 1 week
+        // Don't set secure:true in development as we're not using HTTPS
+        secure: false,
+        httpOnly: true,
+        // Add path for better session persistence
+        path: "/",
+      },
+    }),
+  );
+
+  // Log all session interactions
+  app.use((req, res, next) => {
+    const oldEnd = res.end;
+
+    // Override end method
+    res.end = function (...args) {
+      console.log(
+        `Session after ${req.method} ${req.path}:`,
+        req.session
+          ? JSON.stringify({
+              id: req.session.id,
+              cookie: req.session.cookie,
+              // Only log user ID for security - don't log all user data
+              user: req.session.user ? { id: req.session.user.id } : null,
+            })
+          : "No session",
+      );
+      // @ts-ignore
+      return oldEnd.apply(this, args);
+    };
+
+    next();
+  });
+
+  // Authentication middleware with enhanced error handling, logging, and DB verification
+  const isAuthenticated = async (req: any, res: any, next: any) => {
+    // Log session ID for debugging
+    console.log("Auth check - Session ID:", req.session?.id || "No session ID");
+
+    try {
+      // Check if session exists and has user data
+      if (!req.session || !req.session.user) {
+        console.log("User is not authenticated - no valid session user found");
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      // Verify user object has the expected structure
+      if (!req.session.user.id || !req.session.user.role) {
+        console.error("Invalid user object in session:", req.session.user);
+        return res.status(401).json({ message: "Invalid session structure" });
+      }
+
+      // For additional security, verify that the user still exists in the database
+      // and has active status - this prevents using sessions for deleted/deactivated users
+      const userId = req.session.user.id;
+      const user = await storage.getUser(userId);
+
+      if (!user) {
+        console.error(`User ${userId} found in session but not in database`);
+        // Clear invalid session
+        req.session.destroy((err: any) => {
+          if (err) console.error("Error destroying invalid session:", err);
+        });
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      // Check if user is still active
+      if (user.status !== "active") {
+        console.error(`User ${userId} is no longer active`);
+        // Clear invalid session
+        req.session.destroy((err: any) => {
+          if (err)
+            console.error("Error destroying session for inactive user:", err);
+        });
+        return res.status(401).json({ message: "Account is not active" });
+      }
+
+      // Periodically update the session with the latest user data
+      // This ensures leadCoins, lastLoginAt, etc. stay current
+      const lastSessionUpdate = req.session.lastUpdated || 0;
+      const now = Date.now();
+
+      // Update session data every hour
+      if (now - lastSessionUpdate > 60 * 60 * 1000) {
+        console.log(`Refreshing session data for user ${userId}`);
+
+        const updatedSessionUser = {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          status: user.status,
+          verified: user.verified,
+          profileImage: user.profileImage,
+          leadCoins: user.leadCoins,
+          lastLoginAt: user.lastLoginAt,
+          permissions: user.permissions,
+        };
+
+        req.session.user = updatedSessionUser;
+        req.session.lastUpdated = now;
+      }
+
+      // Log successful authentication in development mode
+      if (process.env.NODE_ENV === "development") {
+        console.log("User is authenticated:", {
+          id: req.session.user.id,
+          role: req.session.user.role,
+          lastUpdated: new Date(req.session.lastUpdated || 0).toISOString(),
+        });
+      }
+
+      return next();
+    } catch (error) {
+      console.error("Authentication error:", error);
+      return res.status(500).json({ message: "Authentication error" });
+    }
+  };
+
+  // Middleware to check if user has specific role
+  const hasRole = (roles: string[]) => {
+    return (req: any, res: any, next: any) => {
+      console.log("hasRole middleware - session:", req.session);
+      console.log("hasRole middleware - allowed roles:", roles);
+
+      if (!req.session || !req.session.user) {
+        console.log("hasRole middleware - no user in session");
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      console.log("hasRole middleware - user role:", req.session.user.role);
+
+      if (roles.includes(req.session.user.role)) {
+        console.log("hasRole middleware - role authorized");
+        return next();
+      }
+
+      console.log("hasRole middleware - insufficient permissions");
+      res.status(403).json({ message: "Forbidden: Insufficient permissions" });
+    };
+  };
+
+  // Middleware to check if subadmin has specific permission
+  const hasPermission = (permission: string) => {
+    return (req: any, res: any, next: any) => {
+      console.log("hasPermission middleware - session:", req.session);
+      console.log(
+        "hasPermission middleware - required permission:",
+        permission,
+      );
+
+      if (!req.session || !req.session.user) {
+        console.log("hasPermission middleware - no user in session");
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      console.log(
+        "hasPermission middleware - user role:",
+        req.session.user.role,
+      );
+
+      // Admin always has all permissions
+      if (req.session.user.role === "admin") {
+        console.log("hasPermission middleware - admin has all permissions");
+        return next();
+      }
+
+      // Subadmin needs to have the specific permission
+      if (req.session.user.role === "subadmin") {
+        // Enhanced logging for debugging permissions
+        const userPermissions = req.session.user.permissions || [];
+        console.log(
+          "hasPermission middleware - subadmin permissions:",
+          userPermissions,
+          "Required permission:",
+          permission,
+          "Has permission:",
+          userPermissions.includes(permission),
+        );
+
+        if (userPermissions.includes(permission)) {
+          console.log("hasPermission middleware - permission granted");
+          return next();
+        }
+      }
+
+      console.log("hasPermission middleware - insufficient permissions");
+      res.status(403).json({ message: "Forbidden: Insufficient permissions" });
+    };
+  };
+
+  // Authentication Routes
+  app.post("/api/auth/register", async (req, res) => {
+    try {
+      const data = insertUserSchema.parse(req.body);
+
+      // Check if user already exists
+      const existingUser = await storage.getUserByEmail(data.email);
+
+      if (existingUser) {
+        // If user exists but is not verified, allow them to proceed to verification
+        if (existingUser.status === "pending" && !existingUser.verified) {
+          // Generate a new verification code
+          const verificationCode = generateOTP();
+
+          // Update the user's verification code
+          await storage.updateUserVerificationCode(
+            existingUser.id,
+            verificationCode,
+          );
+
+          // Send new verification email
+          await mailer.sendVerificationEmail(
+            existingUser.email,
+            verificationCode,
+          );
+
+          return res.status(200).json({
+            message: "Please verify your account to continue",
+            needsVerification: true,
+            email: existingUser.email,
+          });
+        }
+
+        // Otherwise, user already exists
+        return res.status(400).json({ message: "User already exists" });
+      }
+
+      // Hash password
+      const hashedPassword = await bcrypt.hash(data.password, 10);
+
+      // Generate verification code and ensure it's a clean string
+      const verificationCode = generateOTP().trim();
+
+      // Create user
+      console.log("Creating user with data:", {
+        ...data,
+        password: "[REDACTED]",
+        verificationCode: verificationCode,
+        leadCoins: 20,
+      });
+
+      // Add verification code to the data object with the correct field name
+      // Also add 20 LeadCoins to new users
+      const userData = {
+        ...data,
+        password: hashedPassword,
+        verification_code: verificationCode, // This must match the exact field name in schema.ts
+        lead_coins: 20, // Give new users 20 LeadCoins for free
+      };
+
+      console.log("User data with verification code:", {
+        ...userData,
+        password: "[REDACTED]",
+      });
+
+      const user = await storage.createUser(userData);
+
+      // Send verification email
+      await mailer.sendVerificationEmail(user.email, verificationCode);
+
+      res.status(201).json({
+        message:
+          "User registered successfully! You've been given 20 free LeadCoins to get started.",
+        verificationCode,
+      });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: error.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to register user" });
+    }
+  });
+
+  app.post("/api/auth/verify", async (req, res) => {
+    try {
+      const data = verifyUserSchema.parse(req.body);
+      console.log("Verification request:", data);
+      
+      // Get user by email
+      const user = await storage.getUserByEmail(data.email);
+      if (!user) {
+        return res.status(400).json({ message: "User not found" });
+      }
+      
+      // Check verification code
+      console.log("Verification code check:", {
+        stored: user.verification_code,
+        provided: data.code,
+      });
+
+      // Trim any whitespace from both codes before comparison
+      const storedCode = user.verification_code?.trim();
+      const providedCode = data.code?.trim();
+      
+      if (!storedCode || storedCode !== providedCode) {
+        return res.status(400).json({ message: "Invalid verification code" });
+      }
+
+      // Mark user as verified and update status to active
+      await storage.verifyUser(user.id);
+
+      // Get the updated user data to confirm the changes
+      const updatedUser = await storage.getUser(user.id);
+      console.log("User after verification:", {
+        id: updatedUser?.id,
+        email: updatedUser?.email,
+        verified: updatedUser?.verified,
+        status: updatedUser?.status,
+      });
+
+      res.status(200).json({
+        message: "User verified successfully",
+        user: updatedUser
+          ? {
+              ...updatedUser,
+              password: undefined,
+            }
+          : undefined,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: error.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to verify user" });
+    }
+  });
+
+  app.post("/api/auth/resend-code", async (req, res) => {
+    try {
+      const { email } = req.body;
+
+      // Get user by email
+      const user = await storage.getUserByEmail(email);
+      if (!user) {
+        return res.status(400).json({ message: "User not found" });
+      }
+
+      // Generate new verification code and ensure it's clean
+      const verificationCode = generateOTP().trim();
+
+      // Update user verification code
+      await storage.updateUserVerificationCode(user.id, verificationCode);
+
+      // Send verification email
+      await mailer.sendVerificationEmail(user.email, verificationCode);
+
+      res
+        .status(200)
+        .json({ message: "Verification code resent successfully" });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to resend verification code" });
+    }
+  });
+
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      console.log("Login attempt:", { email: req.body.email });
+      const data = loginUserSchema.parse(req.body);
+
+      // Get user by email
+      const user = await storage.getUserByEmail(data.email);
+      if (!user) {
+        console.log("Login failed: User not found", { email: data.email });
+        return res.status(400).json({ message: "Invalid email or password" });
+      }
+
+      console.log("User found:", {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+      });
+
+      // Check if user is verified
+      if (!user.verified) {
+        return res.status(400).json({
+          message:
+            "Account not verified. Please check your email for verification code.",
+        });
+      }
+
+      // Check if user is active
+      if (user.status !== "active") {
+        return res.status(400).json({
+          message:
+            "Your account is blocked by Admin. Please contact with Admin.",
+        });
+      }
+
+      // Verify password
+      const isPasswordValid = await bcrypt.compare(
+        data.password,
+        user.password,
+      );
+      if (!isPasswordValid) {
+        console.log("Login failed: Invalid password", { email: data.email });
+        return res.status(400).json({ message: "Invalid email or password" });
+      }
+
+      // Update lastLoginAt timestamp
+      await storage.updateUserLastLogin(user.id);
+
+      // Get updated user data with lastLoginAt timestamp
+      const updatedUser = await storage.getUser(user.id);
+
+      if (!updatedUser) {
+        return res
+          .status(500)
+          .json({ message: "Failed to update user login status" });
+      }
+
+      // Set session cookie expiration based on rememberMe
+      if (data.rememberMe) {
+        // Set session to expire in 30 days if rememberMe is true
+        req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 days
+      } else {
+        // Default session expiration (7 days)
+        req.session.cookie.maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+      }
+
+      // Save user to session - use a clean user object with fields from the User model in schema.ts
+      const sessionUser = {
+        id: updatedUser.id,
+        email: updatedUser.email,
+        name: updatedUser.name,
+        role: updatedUser.role,
+        status: updatedUser.status,
+        verified: updatedUser.verified,
+        profileImage: updatedUser.profileImage,
+        leadCoins: updatedUser.leadCoins,
+        lastLoginAt: updatedUser.lastLoginAt,
+        // Include permissions for subadmins
+        permissions: updatedUser.permissions,
+      };
+
+      // Assign to session
+      (req.session as any).user = sessionUser;
+
+      // Save the session and wait for it to be saved before sending response
+      req.session.save((err) => {
+        if (err) {
+          console.error("Session save error:", err);
+          return res.status(500).json({ message: "Failed to save session" });
+        }
+
+        console.log("Login successful. Session ID:", req.session.id);
+        console.log("User saved to session:", {
+          id: updatedUser.id,
+          email: updatedUser.email,
+          role: updatedUser.role,
+          lastLoginAt: updatedUser.lastLoginAt,
+          rememberMe: data.rememberMe,
+        });
+
+        // Remove sensitive data
+        const safeUser = { ...updatedUser, password: undefined };
+
+        // Send response only after session is saved
+        res.status(200).json({
+          user: safeUser,
+          rememberMe: data.rememberMe,
+        });
+      });
+    } catch (error) {
+      console.error("Login error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: error.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to login" });
+    }
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    try {
+      // Log the logout request and session info for debugging
+      console.log("Logout requested. Session ID:", req.session.id);
+      const userId = (req.session as any).user?.id;
+
+      if (userId) {
+        console.log(`User ID ${userId} logging out`);
+      } else {
+        console.log("No user in session during logout");
+      }
+
+      // Destroy the session
+      req.session.destroy((err) => {
+        if (err) {
+          console.error("Session destroy error:", err);
+          return res.status(500).json({ message: "Failed to logout" });
+        }
+
+        // Clear the cookie
+        res.clearCookie("leadgen.sid", {
+          path: "/",
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          maxAge: 0,
+        });
+
+        console.log("Logout successful");
+        res.status(200).json({ message: "Logged out successfully" });
+      });
+    } catch (error) {
+      console.error("Logout error:", error);
+      res.status(500).json({ message: "An error occurred during logout" });
+    }
+  });
+
+  app.get("/api/auth/me", async (req, res) => {
+    try {
+      // Always log session check for debugging
+      console.log(
+        "Auth check - Session ID:",
+        req.session?.id || "No session ID",
+      );
+
+      // Get user from session
+      const sessionUser = (req.session as any).user;
+
+      // If no user in session, return not authenticated
+      if (!sessionUser || !sessionUser.id) {
+        console.log("No valid user in session");
+        return res.status(401).json({ message: "Not authenticated" });
+      }
+
+      // Fetch the latest user data from database to ensure it's up-to-date
+      // This ensures we always have the latest user data, including leadCoins and subscription status
+      const user = await storage.getUser(sessionUser.id);
+
+      // If user not found in database (may have been deleted), clear session and return error
+      if (!user) {
+        console.error("User in session not found in database:", sessionUser.id);
+        req.session.destroy((err) => {
+          if (err) console.error("Error destroying invalid session:", err);
+        });
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      // Verify user is still active
+      if (user.status !== "active") {
+        console.error("User account no longer active:", user.id);
+        req.session.destroy((err) => {
+          if (err)
+            console.error("Error destroying session for inactive user:", err);
+        });
+        return res.status(401).json({ message: "Account is not active" });
+      }
+
+      // Log successful authentication
+      console.log("Returning authenticated user:", {
+        id: user.id,
+        role: user.role,
+        email: user.email,
+      });
+
+      // Update the session with the latest user data
+      const updatedSessionUser = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        status: user.status,
+        verified: user.verified,
+        profileImage: user.profileImage,
+        leadCoins: user.leadCoins,
+        lastLoginAt: user.lastLoginAt,
+        permissions: user.permissions,
+      };
+
+      // Update session with fresh data
+      (req.session as any).user = updatedSessionUser;
+
+      // Return the user object, ensuring password is never returned
+      res.status(200).json({ ...user, password: undefined });
+    } catch (error) {
+      console.error("Error in /api/auth/me:", error);
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  app.patch("/api/auth/profile", isAuthenticated, async (req, res) => {
+    try {
+      const data = updateUserProfileSchema.parse(req.body);
+      const userId = (req.session as any).user.id;
+
+      // Update user profile
+      const updatedUser = await storage.updateUserProfile(userId, data);
+
+      // Update session user - preserve permissions if updating profile
+      (req.session as any).user = {
+        ...(req.session as any).user,
+        ...updatedUser,
+        // Ensure permissions are maintained for subadmins
+        permissions:
+          (req.session as any).user.role === "subadmin"
+            ? (req.session as any).user.permissions
+            : undefined,
+      };
+
+      res.status(200).json({ message: "Profile updated successfully" });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: error.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to update profile" });
+    }
+  });
+
+  app.patch("/api/auth/change-password", isAuthenticated, async (req, res) => {
+    try {
+      const data = changePasswordSchema.parse(req.body);
+      const userId = (req.session as any).user.id;
+
+      // Get user
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(400).json({ message: "User not found" });
+      }
+
+      // Verify current password
+      const isPasswordValid = await bcrypt.compare(
+        data.currentPassword,
+        user.password,
+      );
+      if (!isPasswordValid) {
+        return res
+          .status(400)
+          .json({ message: "Current password is incorrect" });
+      }
+
+      // Hash new password
+      const hashedPassword = await bcrypt.hash(data.newPassword, 10);
+
+      // Update password
+      await storage.updateUserPassword(userId, hashedPassword);
+
+      res.status(200).json({ message: "Password changed successfully" });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: error.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to change password" });
+    }
+  });
+
+  app.post("/api/auth/reset-password", async (req, res) => {
+    try {
+      const { email } = req.body;
+
+      // Get user by email
+      const user = await storage.getUserByEmail(email);
+      if (!user) {
+        // Don't reveal that the user doesn't exist
+        return res.status(200).json({
+          message:
+            "If an account with that email exists, we have sent a password reset link",
+        });
+      }
+
+      const resetToken = randomBytes(16).toString("hex");
+
+      // Update user reset token
+      await storage.updateUserResetToken(user.id, resetToken);
+
+      // Send reset email with the link
+      await mailer.sendPasswordResetEmail(user.email, resetToken);
+
+      res.status(200).json({
+        message:
+          "If an account with that email exists, we have sent a password reset link",
+      });
+    } catch (error) {
+      console.error("Error sending reset password email:", error);
+      res.status(500).json({ message: "Failed to send reset password email" });
+    }
+  });
+
+  // Handle password reset with token
+  app.post("/api/auth/set-new-password", async (req, res) => {
+    try {
+      // Validate required fields
+      const { email, resetToken, password } = req.body;
+
+      if (!email || !resetToken || !password) {
+        return res.status(400).json({
+          message: "Email, reset token, and new password are required",
+        });
+      }
+
+      // Find user by email
+      const user = await storage.getUserByEmail(email);
+      if (!user) {
+        return res.status(400).json({ message: "Invalid email or token" });
+      }
+
+      // Verify the reset token matches
+      if (user.resetToken !== resetToken) {
+        return res.status(400).json({ message: "Invalid or expired token" });
+      }
+
+      // Hash the new password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Update the user's password
+      await storage.updateUserPassword(user.id, hashedPassword);
+
+      // Clear the reset token
+      await storage.updateUserResetToken(user.id, "");
+
+      // Return success
+      res.status(200).json({
+        message:
+          "Password has been reset successfully. You can now log in with your new password.",
+      });
+    } catch (error) {
+      console.error("Error setting new password:", error);
+      res
+        .status(500)
+        .json({ message: "Failed to reset password. Please try again." });
+    }
+  });
+
+  // User Management Routes
+  app.get(
+    "/api/users",
+    isAuthenticated,
+    hasRole(["admin", "subadmin"]),
+    async (req, res) => {
+      try {
+        // Parse pagination parameters with defaults
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 10;
+
+        // Get paginated users
+        const { users, total } = await storage.getAllUsers(page, limit);
+
+        // Return data with pagination metadata
+        res.status(200).json({
+          users: users.map((user: User) => ({ ...user, password: undefined })),
+          pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+          },
+        });
+      } catch (error) {
+        console.log("Error fetching users:", error);
+        res.status(500).json({ message: "Failed to fetch users" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/users",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const data = insertUserSchema.parse(req.body);
+
+        // Check if user already exists
+        const existingUser = await storage.getUserByEmail(data.email);
+        if (existingUser) {
+          return res.status(400).json({ message: "User already exists" });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(data.password, 10);
+
+        // Create user (as admin, no verification needed)
+        const user = await storage.createUser({
+          ...data,
+          password: hashedPassword,
+          verified: true,
+          verification_code: "", // Initialize with empty string since verified=true
+        });
+
+        res.status(201).json({ ...user, password: undefined });
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          return res.status(400).json({ message: error.errors[0].message });
+        }
+        res.status(500).json({ message: "Failed to create user" });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/users/:id",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const userId = parseInt(id);
+
+        // Get user
+        const user = await storage.getUser(userId);
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        // Update user
+        const updatedData: Partial<User> = {};
+
+        if (req.body.name) updatedData.name = req.body.name;
+        if (req.body.role) updatedData.role = req.body.role;
+        if (req.body.status) updatedData.status = req.body.status;
+        if (req.body.password) {
+          updatedData.password = await bcrypt.hash(req.body.password, 10);
+        }
+
+        const updatedUser = await storage.updateUser(userId, updatedData);
+
+        res.status(200).json({ ...updatedUser, password: undefined });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to update user" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/users/:id",
+    isAuthenticated,
+    hasRole(["admin", "subadmin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const userId = parseInt(id);
+
+        // Get user
+        const user = await storage.getUser(userId);
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        await storage.deleteUser(userId);
+        return res.status(200).json({ message: "User Deleted Successfully" });
+      } catch (error) {
+        console.error("Error deleting user:", error);
+        res.status(500).json({ message: "Failed to delete user" });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/users/:id/status",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const userId = parseInt(id);
+        const { status } = req.body;
+
+        // Get user
+        const user = await storage.getUser(userId);
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        // Update user status
+        await storage.updateUserStatus(userId, status);
+
+        res.status(200).json({ message: "User status updated successfully" });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to update user status" });
+      }
+    },
+  );
+
+  // Subadmin Management Routes
+  app.get(
+    "/api/subadmins",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const subadmins = await storage.getSubadmins();
+        res
+          .status(200)
+          .json(
+            subadmins.map((subadmin) => ({ ...subadmin, password: undefined })),
+          );
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch subadmins" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/subadmins",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const data = createSubadminSchema.parse(req.body);
+
+        // Check if subadmin already exists
+        const existingUser = await storage.getUserByEmail(data.email);
+        if (existingUser) {
+          return res.status(400).json({ message: "User already exists" });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(data.password, 10);
+
+        // Create subadmin
+        const subadmin = await storage.createSubadmin({
+          email: data.email,
+          name: data.name,
+          password: hashedPassword,
+          permissions: data.permissions,
+          verification_code: "", // Use the correct field name
+        });
+
+        res.status(201).json({ ...subadmin, password: undefined });
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          return res.status(400).json({ message: error.errors[0].message });
+        }
+        res.status(500).json({ message: "Failed to create subadmin" });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/subadmins/:id/permissions",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const userId = parseInt(id);
+        const { permissions } = req.body;
+
+        // Get subadmin
+        const subadmin = await storage.getUser(userId);
+        if (!subadmin || subadmin.role !== "subadmin") {
+          return res.status(404).json({ message: "Subadmin not found" });
+        }
+
+        // Update subadmin permissions
+        await storage.updateSubadminPermissions(userId, permissions);
+
+        // Log the updated permissions for debugging
+        console.log(`Updated permissions for subadmin ${userId}:`, permissions);
+
+        // If this subadmin is currently logged in, update their session
+        if (
+          req.session &&
+          (req.session as any).user &&
+          (req.session as any).user.id === userId
+        ) {
+          console.log("Updating permissions in active session for subadmin");
+          (req.session as any).user.permissions = permissions;
+
+          // Save session changes
+          req.session.save((err) => {
+            if (err) {
+              console.error(
+                "Error saving updated permissions to session:",
+                err,
+              );
+            } else {
+              console.log("Session updated with new permissions");
+            }
+          });
+        }
+
+        res
+          .status(200)
+          .json({ message: "Subadmin permissions updated successfully" });
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Failed to update subadmin permissions" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/subadmins/:id",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const userId = parseInt(id);
+
+        // Get subadmin
+        const subadmin = await storage.getUser(userId);
+        if (!subadmin || subadmin.role !== "subadmin") {
+          return res.status(404).json({ message: "Subadmin not found" });
+        }
+
+        // Delete subadmin
+        await storage.deleteUser(userId);
+
+        res.status(200).json({ message: "Subadmin deleted successfully" });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to delete subadmin" });
+      }
+    },
+  );
+
+  // Lead Category Management Routes
+  app.get("/api/lead-categories", isAuthenticated, async (req, res) => {
+    try {
+      const categories = await storage.getAllLeadCategories();
+      res.status(200).json(categories);
+    } catch (error: any) {
+      console.error("Error getting lead categories:", error);
+      res.status(500).json({
+        message: "Error getting lead categories",
+        error: error.message,
+      });
+    }
+  });
+
+  // Route to get only categories that are used in leads (for filtering in user panel)
+  app.get("/api/lead-categories/used", isAuthenticated, async (req, res) => {
+    try {
+      const categories = await storage.getUsedLeadCategories();
+      res.status(200).json(categories);
+    } catch (error: any) {
+      console.error("Error getting used lead categories:", error);
+      res.status(500).json({
+        message: "Error getting used lead categories",
+        error: error.message,
+      });
+    }
+  });
+
+  // Route to get active lead categories
+  app.get("/api/lead-categories/active", isAuthenticated, async (req, res) => {
+    try {
+      const categories = await storage.getActiveLeadCategories();
+      res.status(200).json(categories);
+    } catch (error: any) {
+      console.error("Error getting active lead categories:", error);
+      res.status(500).json({
+        message: "Error getting active lead categories",
+        error: error.message,
+      });
+    }
+  });
+
+  app.get("/api/lead-categories/:id", isAuthenticated, async (req, res) => {
+    try {
+      const category = await storage.getLeadCategory(Number(req.params.id));
+      if (!category) {
+        return res.status(404).json({ message: "Lead category not found" });
+      }
+      res.json(category);
+    } catch (error: any) {
+      console.error("Error getting lead category:", error);
+      res
+        .status(500)
+        .json({ message: "Error getting lead category", error: error.message });
+    }
+  });
+
+  app.post(
+    "/api/lead-categories",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const parsed = insertLeadCategorySchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            message: "Invalid lead category data",
+            errors: parsed.error.errors,
+          });
+        }
+
+        const newCategory = await storage.createLeadCategory(parsed.data);
+        res.status(201).json(newCategory);
+      } catch (error: any) {
+        console.error("Error creating lead category:", error);
+        res.status(500).json({
+          message: "Error creating lead category",
+          error: error.message,
+        });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/lead-categories/:id",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const categoryId = Number(req.params.id);
+
+        // First check if the category exists
+        const existingCategory = await storage.getLeadCategory(categoryId);
+        if (!existingCategory) {
+          return res.status(404).json({ message: "Lead category not found" });
+        }
+
+        const updatedCategory = await storage.updateLeadCategory(
+          categoryId,
+          req.body,
+        );
+        res.json(updatedCategory);
+      } catch (error: any) {
+        console.error("Error updating lead category:", error);
+        res.status(500).json({
+          message: "Error updating lead category",
+          error: error.message,
+        });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/lead-categories/:id",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const categoryId = Number(req.params.id);
+
+        // First check if the category exists
+        const existingCategory = await storage.getLeadCategory(categoryId);
+        if (!existingCategory) {
+          return res.status(404).json({ message: "Lead category not found" });
+        }
+
+        await storage.deleteLeadCategory(categoryId);
+        res.status(204).send();
+      } catch (error: any) {
+        console.error("Error deleting lead category:", error);
+        res.status(500).json({
+          message: "Error deleting lead category",
+          error: error.message,
+        });
+      }
+    },
+  );
+
+  // Lead Management Routes
+  app.get("/api/leads", isAuthenticated, async (req, res) => {
+    try {
+      const leads = await storage.getAllLeads();
+      res.status(200).json(leads);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch leads" });
+    }
+  });
+
+  app.get("/api/leads/:id", isAuthenticated, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const leadId = parseInt(id);
+
+      const lead = await storage.getLead(leadId);
+      if (!lead) {
+        return res.status(404).json({ message: "Lead not found" });
+      }
+
+      res.status(200).json(lead);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch lead" });
+    }
+  });
+
+  // Endpoint to check if a user has already viewed a lead
+  app.get("/api/viewed-leads/:leadId", isAuthenticated, async (req, res) => {
+    try {
+      const leadId = parseInt(req.params.leadId);
+      const userId = (req.session as any).user.id;
+
+      // Check if this lead has already been viewed by this user
+      const existingView = await storage.getViewedLead(userId, leadId);
+
+      if (existingView) {
+        // Lead was already viewed
+        return res.status(200).json({
+          found: true,
+          message: "Lead was previously viewed by this user",
+        });
+      } else {
+        // Lead has not been viewed yet
+        return res.status(200).json({
+          found: false,
+          message: "Lead has not been viewed by this user yet",
+        });
+      }
+    } catch (error) {
+      console.error("Error checking viewed lead:", error);
+      res.status(500).json({ message: "Failed to check if lead was viewed" });
+    }
+  });
+
+  // Route to track when a user views a lead's contact info and deduct LeadCoins
+  app.post("/api/leads/:id/view", isAuthenticated, async (req, res) => {
+    try {
+      const leadId = parseInt(req.params.id);
+      const userId = (req.session as any).user.id;
+      const userRole = (req.session as any).user.role;
+
+      // Admin and subadmin can view leads without verification
+      if (userRole === "admin" || userRole === "subadmin") {
+        return res.status(200).json({
+          success: true,
+          alreadyViewed: true,
+        });
+      }
+
+      // Check if this lead has already been viewed by this user
+      const existingView = await storage.getViewedLead(userId, leadId);
+
+      if (existingView) {
+        // User has already viewed this lead, no need to deduct coins again
+        return res.status(200).json({
+          message: "Lead already viewed",
+          alreadyViewed: true,
+          success: true,
+        });
+      }
+
+      // Get the lead coin settings to determine how many coins to deduct
+      const settings = await storage.getLeadCoinSettings();
+      const contactInfoCost = settings?.contactInfoCost || 5;
+
+      // Get the user to check if they have enough coins
+      const user = await storage.getUser(userId);
+
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      if (user.leadCoins < contactInfoCost) {
+        return res.status(400).json({
+          message:
+            "Insufficient LeadCoins. Please purchase more coins to view lead details.",
+          success: false,
+        });
+      }
+
+      // Deduct the coins from the user
+      await storage.updateUserLeadCoins(
+        userId,
+        user.leadCoins - contactInfoCost,
+      );
+
+      // Record that this lead was viewed by this user
+      await storage.createViewedLead(userId, leadId);
+
+      // Update user's lead coins in the session
+      (req.session as any).user.leadCoins = user.leadCoins - contactInfoCost;
+
+      res.status(200).json({
+        message: "Lead view recorded successfully",
+        coinsDeducted: contactInfoCost,
+        remainingCoins: user.leadCoins - contactInfoCost,
+        alreadyViewed: false,
+        success: true,
+      });
+    } catch (error) {
+      console.error("Error tracking lead view:", error);
+      res.status(500).json({ message: "Failed to track lead view" });
+    }
+  });
+
+  app.post(
+    "/api/leads",
+    isAuthenticated,
+    hasPermission("leads_management"),
+    async (req, res) => {
+      try {
+        // Clone request body to work with it
+        const requestData = { ...req.body };
+        const userId = (req.session as any).user.id;
+
+        let categoryId = requestData.categoryId;
+        const categoryName = requestData.categoryName;
+
+        // Check if this is a custom category (negative ID with a name provided)
+        if (categoryId && categoryId < 0 && categoryName) {
+          console.log("Creating new category from lead form:", categoryName);
+
+          try {
+            // Create a new category
+            const newCategory = await storage.createLeadCategory({
+              name: categoryName,
+              description: categoryName, // Use name as description too
+              active: true,
+            });
+
+            // Use the newly created category ID
+            categoryId = newCategory.id;
+            // Update the request data with the new ID
+            requestData.categoryId = categoryId;
+            // Remove the categoryName as we don't need it anymore
+            delete requestData.categoryName;
+
+            console.log("Created new category with ID:", categoryId);
+          } catch (error) {
+            console.error("Error creating new category:", error);
+            // If category creation fails, we'll still try to create the lead
+            // but with no category
+          }
+        }
+
+        // Validate the lead data
+        const data = insertLeadSchema.parse(requestData);
+
+        // Create lead
+        const lead = await storage.createLead({
+          ...data,
+          creatorId: userId,
+        });
+
+        res.status(201).json(lead);
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          return res.status(400).json({ message: error.errors[0].message });
+        }
+        console.error("Failed to create lead:", error);
+        res.status(500).json({ message: "Failed to create lead" });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/leads/:id",
+    isAuthenticated,
+    hasPermission("leads_management"),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const leadId = parseInt(id);
+        const requestData = { ...req.body };
+
+        // Get lead
+        const lead = await storage.getLead(leadId);
+        if (!lead) {
+          return res.status(404).json({ message: "Lead not found" });
+        }
+
+        // Handle custom category if present
+        if (
+          requestData.categoryId &&
+          requestData.categoryId < 0 &&
+          requestData.categoryName
+        ) {
+          console.log(
+            "Creating new category from lead update:",
+            requestData.categoryName,
+          );
+
+          try {
+            // Create a new category
+            const newCategory = await storage.createLeadCategory({
+              name: requestData.categoryName,
+              description: requestData.categoryName,
+              active: true,
+            });
+
+            // Use the newly created category ID
+            requestData.categoryId = newCategory.id;
+            // Remove categoryName from the request
+            delete requestData.categoryName;
+
+            console.log("Created new category with ID:", newCategory.id);
+          } catch (error) {
+            console.error(
+              "Error creating new category during lead update:",
+              error,
+            );
+            // If category creation fails, we'll still try to update the lead
+          }
+        }
+
+        // Update lead
+        const updatedData: Partial<Lead> = {};
+
+        // Only update fields that are provided
+        if (requestData.title) updatedData.title = requestData.title;
+        if (requestData.description)
+          updatedData.description = requestData.description;
+        if (requestData.location) updatedData.location = requestData.location;
+        if (requestData.price) updatedData.price = requestData.price;
+        if (requestData.totalMembers)
+          updatedData.totalMembers = requestData.totalMembers;
+        if (requestData.images) updatedData.images = requestData.images;
+        if (requestData.email) updatedData.email = requestData.email;
+        if (requestData.contactNumber)
+          updatedData.contactNumber = requestData.contactNumber;
+        if (requestData.skills) updatedData.skills = requestData.skills;
+        if (requestData.duration) updatedData.duration = requestData.duration;
+        if (requestData.workType) updatedData.workType = requestData.workType;
+        if (requestData.categoryId !== undefined)
+          updatedData.categoryId = requestData.categoryId;
+
+        console.log("Updating lead with data:", updatedData);
+
+        const updatedLead = await storage.updateLead(leadId, updatedData);
+
+        res.status(200).json(updatedLead);
+      } catch (error) {
+        console.error("Failed to update lead:", error);
+        res.status(500).json({ message: "Failed to update lead" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/leads/:id",
+    isAuthenticated,
+    // hasPermission("leads_management"),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const leadId = parseInt(id);
+
+        // Get lead
+        const lead = await storage.getLead(leadId);
+        console.log("hererererreeLEAD", lead, leadId);
+        if (!lead) {
+          return res.status(404).json({ message: "Lead not found" });
+        }
+
+        // Delete lead
+        await storage.deleteLead(leadId);
+
+        res.status(200).json({ message: "Lead deleted successfully" });
+      } catch (error) {
+        console.error("Error deleting lead:", error);
+        res.status(500).json({ message: "Failed to delete lead" });
+      }
+    },
+  );
+
+  // The lead view tracking route is already defined above
+
+  // Subscription Management Routes
+  app.get("/api/subscriptions", isAuthenticated, async (req, res) => {
+    try {
+      const subscriptions = await storage.getAllSubscriptions();
+      res.status(200).json(subscriptions);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch subscriptions" });
+    }
+  });
+
+  app.post(
+    "/api/subscriptions",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const data = insertSubscriptionSchema.parse(req.body);
+
+        // Create subscription
+        const subscription = await storage.createSubscription(data);
+
+        res.status(201).json(subscription);
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          return res.status(400).json({ message: error.errors[0].message });
+        }
+        res.status(500).json({ message: "Failed to create subscription" });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/subscriptions/:id",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const subscriptionId = parseInt(id);
+
+        // Get subscription
+        const subscription = await storage.getSubscription(subscriptionId);
+        if (!subscription) {
+          return res.status(404).json({ message: "Subscription not found" });
+        }
+
+        // Update subscription
+        const updatedData: Partial<Subscription> = {};
+
+        if (req.body.name) updatedData.name = req.body.name;
+        if (req.body.description)
+          updatedData.description = req.body.description;
+        if (req.body.price) updatedData.price = req.body.price;
+        if (req.body.durationDays)
+          updatedData.durationDays = req.body.durationDays;
+        if (req.body.leadCoins) updatedData.leadCoins = req.body.leadCoins;
+        if (req.body.features) updatedData.features = req.body.features;
+        if (req.body.active !== undefined) updatedData.active = req.body.active;
+
+        const updatedSubscription = await storage.updateSubscription(
+          subscriptionId,
+          updatedData,
+        );
+
+        res.status(200).json(updatedSubscription);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to update subscription" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/subscriptions/:id",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const subscriptionId = parseInt(id);
+
+        // Get subscription
+        const subscription = await storage.getSubscription(subscriptionId);
+        if (!subscription) {
+          return res.status(404).json({ message: "Subscription not found" });
+        }
+
+        // Delete subscription
+        await storage.deleteSubscription(subscriptionId);
+
+        res.status(200).json({ message: "Subscription deleted successfully" });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to delete subscription" });
+      }
+    },
+  );
+
+  // Toggle subscription active status
+  app.patch(
+    "/api/subscriptions/:id/toggle-status",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const subscriptionId = parseInt(id);
+
+        // Get subscription
+        const subscription = await storage.getSubscription(subscriptionId);
+        if (!subscription) {
+          return res.status(404).json({ message: "Subscription not found" });
+        }
+
+        // Toggle active status
+        const updatedSubscription = await storage.updateSubscription(
+          subscriptionId,
+          { active: !subscription.active },
+        );
+
+        res.status(200).json(updatedSubscription);
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Failed to toggle subscription status" });
+      }
+    },
+  );
+
+  app.get("/api/subscriptions/current", isAuthenticated, async (req, res) => {
+    try {
+      const userId = (req.session as any).user.id;
+
+      // Get user's active subscription
+      const subscription = await storage.getUserActiveSubscription(userId);
+      if (!subscription) {
+        return res
+          .status(404)
+          .json({ message: "No active subscription found" });
+      }
+
+      res.status(200).json(subscription);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch current subscription" });
+    }
+  });
+
+  app.get("/api/subscriptions/history", isAuthenticated, async (req, res) => {
+    try {
+      const userId = (req.session as any).user.id;
+
+      // Get user's subscription history
+      const subscriptions = await storage.getUserSubscriptionHistory(userId);
+
+      // For each subscription, fetch the subscription details
+      const detailedSubscriptions = await Promise.all(
+        subscriptions.map(async (userSub) => {
+          const planDetails = await storage.getSubscription(
+            userSub.subscriptionId,
+          );
+          return {
+            ...userSub,
+            plan: planDetails,
+          };
+        }),
+      );
+
+      res.status(200).json(detailedSubscriptions);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch subscription history" });
+    }
+  });
+
+  app.get("/api/subscriptions/pending", isAuthenticated, async (req, res) => {
+    try {
+      const userId = (req.session as any).user.id;
+
+      // Get user's pending subscriptions
+      const pendingSubscriptions = await db
+        .select()
+        .from(userSubscriptions)
+        .where(
+          and(
+            eq(userSubscriptions.userId, userId),
+            eq(userSubscriptions.status, "pending"),
+          ),
+        )
+        .orderBy(userSubscriptions.startDate);
+
+      // For each subscription, fetch the subscription details
+      const detailedPendingSubscriptions = await Promise.all(
+        pendingSubscriptions.map(async (userSub) => {
+          const planDetails = await storage.getSubscription(
+            userSub.subscriptionId,
+          );
+          return {
+            ...userSub,
+            plan: planDetails,
+          };
+        }),
+      );
+
+      res.status(200).json(detailedPendingSubscriptions);
+    } catch (error) {
+      res
+        .status(500)
+        .json({ message: "Failed to fetch pending subscriptions" });
+    }
+  });
+
+  app.post(
+    "/api/subscriptions/subscribe",
+    isAuthenticated,
+    async (req, res) => {
+      try {
+        const { subscriptionId } = req.body;
+        const userId = (req.session as any).user.id;
+
+        console.log(
+          `Creating subscription payment for user ${userId} and subscription ${subscriptionId}`,
+        );
+
+        // Get subscription
+        const subscription = await storage.getSubscription(subscriptionId);
+        if (!subscription) {
+          console.log(`Subscription ${subscriptionId} not found`);
+          return res.status(404).json({ message: "Subscription not found" });
+        }
+
+        console.log(
+          `Found subscription: ${subscription.name}, price: ${subscription.price}`,
+        );
+
+        // Get user's subscription history
+        const userSubscriptionHistory = await storage.getUserSubscriptionHistory(userId);
+        
+        // Check for pending subscriptions for this plan to prevent duplicates
+        const hasPendingForThisPlan = userSubscriptionHistory.some(
+          sub => sub.subscriptionId === Number(subscriptionId) && sub.status === "pending"
+        );
+        
+        if (hasPendingForThisPlan) {
+          console.log(`User ${userId} already has a pending subscription for plan ${subscriptionId}`);
+          return res.status(400).json({
+            message: "You already have a pending payment for this subscription plan",
+          });
+        }
+        
+        // Count how many active or pending subscriptions the user has purchased
+        const activeOrPendingSubscriptions = userSubscriptionHistory.filter(
+          sub => ["active", "pending"].includes(sub.status)
+        ).length;
+        
+        // Check if user already has 3 subscriptions (the maximum allowed)
+        if (activeOrPendingSubscriptions >= 3) {
+          console.log(
+            `User ${userId} has already purchased the maximum of 3 subscription plans`,
+          );
+          return res.status(400).json({
+            message: "You have reached the maximum limit of 3 subscription plans. Please purchase LeadCoins instead.",
+            subscriptionCount: activeOrPendingSubscriptions,
+          });
+        }
+        
+        // Check if user has active subscription
+        const activeSubscription =
+          await storage.getUserActiveSubscription(userId);
+
+        // Check if user already has an active subscription for this specific plan
+        if (activeSubscription && 
+            activeSubscription.status === "active" && 
+            activeSubscription.subscriptionId === Number(subscriptionId)) {
+          console.log(
+            `User ${userId} already has an active subscription for plan ${subscriptionId}`,
+          );
+          return res.status(400).json({
+            message: "You already have an active subscription for this plan",
+            activeSubscription,
+          });
+        }
+
+        console.log(
+          `Creating payment session for user ${userId} and subscription ${subscription.id}`,
+        );
+
+        // Create a payment session using Stripe and return payment details
+        try {
+          // Create a Stripe payment session for the subscription
+          const paymentSession = await createSubscriptionPaymentSession(
+            (req.session as any).user,
+            subscription,
+          );
+
+          console.log(
+            `Payment session created successfully: ${paymentSession.sessionId}`,
+          );
+
+          // Return payment session details to the client
+          return res.status(200).json({
+            message: "Payment session created",
+            paymentSession,
+            subscription,
+          });
+        } catch (error) {
+          console.error("Error creating payment session:", error);
+          return res.status(500).json({
+            message: "Failed to create payment session",
+            error: error.message,
+          });
+        }
+
+        /* Legacy code - now using Stripe payments
+        // Create user subscription with appropriate status
+        const userSubscription = await storage.createUserSubscription({
+          userId,
+          subscriptionId,
+          // If user already has an active subscription, set status to pending
+          status: activeSubscription ? "pending" : "active",
+        });
+
+        // Only update lead coins if this is an active subscription (not pending)
+        if (!activeSubscription) {
+          // Update user's lead coins only for active subscriptions
+          await storage.updateUserLeadCoins(userId, subscription.leadCoins);
+
+          // Update session user's lead coins
+          (req.session as any).user.leadCoins = subscription.leadCoins;
+        }
+        */
+
+        // Get the updated user data to return to the client for real-time updates
+        const updatedUser = await storage.getUser(userId);
+
+        res.status(201).json({
+          userSubscription,
+          userData: updatedUser, // Include updated user data for real-time frontend updates
+          message: "Subscription created successfully",
+        });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to subscribe" });
+      }
+    },
+  );
+
+  app.get("/api/subscriptions/:id", async (req, res) => {
+    const subscriptionId = req.params.id;
+
+    try {
+      const subscription = await storage.getSubscription(subscriptionId);
+
+      if (!subscription) {
+        return res.status(404).json({ message: "Subscription not found" });
+      }
+
+      return res
+        .status(200)
+        .json({ message: "Subscription view", data: subscription });
+    } catch (error) {
+      console.error("Error fetching subscription:", error);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  app.post(
+    "/api/subscriptions/buy-coins",
+    isAuthenticated,
+    async (req, res) => {
+      try {
+        const { subscriptionId } = req.body;
+        const userId = (req.session as any).user.id;
+
+        // Get subscription
+        const subscription = await storage.getSubscription(subscriptionId);
+        if (!subscription) {
+          return res.status(404).json({ message: "Subscription not found" });
+        }
+
+        // Get user
+        const user = await storage.getUser(userId);
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        // Add lead coins to user
+        const newLeadCoins = user.leadCoins + subscription.leadCoins;
+        await storage.updateUserLeadCoins(userId, newLeadCoins);
+
+        // Update session user's lead coins
+        (req.session as any).user.leadCoins = newLeadCoins;
+
+        // Get the updated user data for real-time frontend updates
+        const updatedUser = await storage.getUser(userId);
+
+        res.status(200).json({
+          message: "LeadCoins purchased successfully",
+          userData: updatedUser, // Include updated user data for real-time frontend updates
+          leadCoinsAdded: subscription.leadCoins,
+          totalLeadCoins: newLeadCoins,
+        });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to buy lead coins" });
+      }
+    },
+  );
+
+  // Subscription purchase with Stripe payment
+  app.post("/api/subscriptions/purchase", isAuthenticated, async (req, res) => {
+    try {
+      const { subscriptionId } = req.body;
+      const userId = (req.session as any).user.id;
+
+      console.log(`Processing subscription purchase for user ${userId} and subscription ${subscriptionId}`);
+
+      // Get subscription
+      const subscription = await storage.getSubscription(subscriptionId);
+      if (!subscription) {
+        return res.status(404).json({ message: "Subscription not found" });
+      }
+
+      // Get user
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Get user's subscription history
+      const userSubscriptionHistory = await storage.getUserSubscriptionHistory(userId);
+      
+      // Check for pending subscriptions for this plan to prevent duplicates
+      const hasPendingForThisPlan = userSubscriptionHistory.some(
+        sub => sub.subscriptionId === Number(subscriptionId) && sub.status === "pending"
+      );
+      
+      if (hasPendingForThisPlan) {
+        console.log(`User ${userId} already has a pending subscription for plan ${subscriptionId}`);
+        return res.status(400).json({
+          message: "You already have a pending payment for this subscription plan",
+        });
+      }
+      
+      // Count how many active or pending subscriptions the user has purchased
+      const activeOrPendingSubscriptions = userSubscriptionHistory.filter(
+        sub => ["active", "pending"].includes(sub.status)
+      ).length;
+      
+      // Check if user already has 3 subscriptions (the maximum allowed)
+      if (activeOrPendingSubscriptions >= 3) {
+        console.log(
+          `User ${userId} has already purchased the maximum of 3 subscription plans`,
+        );
+        return res.status(400).json({
+          message: "You have reached the maximum limit of 3 subscription plans. Please purchase LeadCoins instead.",
+          subscriptionCount: activeOrPendingSubscriptions,
+        });
+      }
+      
+      // Check if user already has an active subscription for this plan
+      const hasActiveForThisPlan = userSubscriptionHistory.some(
+        sub => sub.subscriptionId === Number(subscriptionId) && sub.status === "active"
+      );
+      
+      if (hasActiveForThisPlan) {
+        console.log(`User ${userId} already has an active subscription for plan ${subscriptionId}`);
+        return res.status(400).json({
+          message: "You already have an active subscription for this plan",
+        });
+      }
+
+      // Create a payment session with Stripe and generate QR code
+      const paymentSession = await createSubscriptionPaymentSession(
+        user,
+        subscription,
+      );
+
+      console.log(`Created payment session ${paymentSession.sessionId} for user ${userId}`);
+
+      // Create a pending subscription record
+      const userSubscription = await storage.createUserSubscription({
+        userId,
+        subscriptionId,
+        status: "pending", // Always start with pending status
+        startDate: new Date(),
+        paymentSessionId: paymentSession.sessionId,
+        leadCoinsLeft: subscription.leadCoins,
+        initialLeadCoins: subscription.leadCoins,
+        paymentVerified: false, // Add this field to explicitly track verification
+        amount: subscription.price,
+      });
+
+      console.log(`Created pending subscription record ID: ${userSubscription.id}`);
+
+      // Return payment session details with QR code
+      res.status(200).json({
+        message: "Payment session created",
+        paymentSession,
+        subscription,
+      });
+    } catch (error) {
+      console.error("Error creating payment session:", error);
+      res.status(500).json({ message: "Failed to create payment session" });
+    }
+  });
+  
+  // Direct Stripe Checkout endpoint for subscription purchases
+  app.post("/api/subscriptions/create-checkout-session", isAuthenticated, async (req, res) => {
+    try {
+      const { subscriptionId, paymentMethod, paymentToken } = req.body;
+      const userId = (req.session as any).user.id;
+      const userEmail = (req.session as any).user.email;
+      
+      console.log(`Creating checkout for user ${userId} and subscription ${subscriptionId}`, 
+        paymentMethod ? `using ${paymentMethod}` : "using direct checkout");
+
+      // Get subscription
+      const subscription = await storage.getSubscription(subscriptionId);
+      if (!subscription) {
+        return res.status(404).json({ message: "Subscription not found" });
+      }
+
+      // Check if user already has an active subscription
+      const activeSubscription = await storage.getUserActiveSubscription(userId);
+      if (activeSubscription && activeSubscription.status === 'active') {
+        return res.status(400).json({ 
+          message: "You already have an active subscription",
+          activeSubscription
+        });
+      }
+      
+      // Handle Google Pay payment directly if token is provided
+      if (paymentMethod === "google_pay" && paymentToken) {
+        console.log("Processing Google Pay payment through unified checkout endpoint");
+        try {
+          // Process the Google Pay payment using our existing function
+          const result = await processGooglePayPayment(userId, subscriptionId, paymentToken);
+          
+          if (result.success) {
+            return res.status(200).json({
+              success: true,
+              transaction: result.transaction,
+              message: "Payment processed successfully"
+            });
+          } else {
+            return res.status(400).json({
+              success: false,
+              message: result.message || "Payment processing failed"
+            });
+          }
+        } catch (googlePayError) {
+          console.error("Google Pay processing error:", googlePayError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to process Google Pay payment. Please try another payment method.",
+            error: googlePayError.message
+          });
+        }
+      }
+      
+      // Default to Stripe Checkout for all other cases
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ["card"],
+        mode: "payment",
+        success_url: `https://${process.env.REPLIT_DOMAINS?.split(",")[0] || "localhost:3000"}/user/subscriptions?success=true&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `https://${process.env.REPLIT_DOMAINS?.split(",")[0] || "localhost:3000"}/user/subscriptions?canceled=true`,
+        customer_email: userEmail,
+        client_reference_id: userId.toString(),
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: {
+                name: subscription.name,
+                description: subscription.description || undefined,
+              },
+              unit_amount: Math.round(subscription.price * 100), // Convert to cents
+            },
+            quantity: 1,
+          },
+        ],
+        metadata: {
+          userId: userId.toString(),
+          subscriptionId: subscription.id.toString(),
+          subscriptionName: subscription.name,
+          paymentType: "checkout",
+        },
+        expires_at: Math.floor(Date.now() / 1000) + 30 * 60, // 30 minutes from now
+      });
+
+      if (!session.url) {
+        throw new Error("Failed to generate payment URL");
+      }
+      
+      // Create a pending subscription record with the payment session ID
+      await executeWithRetry(async () => {
+        await storage.createUserSubscription({
+          userId: userId,
+          subscriptionId: subscription.id,
+          startDate: new Date(),
+          endDate: new Date(
+            Date.now() + subscription.durationDays * 24 * 60 * 60 * 1000
+          ),
+          status: "pending",
+          paymentSessionId: session.id,
+          paymentVerified: false,
+          leadCoinsLeft: subscription.leadCoins,
+        });
+      });
+      
+      // Return checkout URL for redirection
+      return res.status(200).json({
+        checkoutUrl: session.url,
+        sessionId: session.id,
+        message: "Checkout session created"
+      });
+    } catch (error) {
+      console.error("Error creating checkout session:", error);
+      res.status(500).json({ 
+        message: "Failed to create checkout session",
+        error: error.message
+      });
+    }
+  });
+
+  // Verify payment success (query param version)
+  app.get(
+    "/api/subscriptions/verify-payment",
+    isAuthenticated, 
+    async (req, res) => {
+      try {
+        const sessionId = req.query.sessionId as string;
+        
+        if (!sessionId) {
+          return res.status(400).json({ 
+            success: false, 
+            message: "Session ID is required" 
+          });
+        }
+        
+        // Verify payment session
+        const verificationResult = await verifyPaymentSession(sessionId);
+
+        if (verificationResult.verified) {
+          const userId = parseInt(verificationResult.userId || "0");
+          const subscriptionId = parseInt(
+            verificationResult.subscriptionId || "0",
+          );
+
+          if (!userId || !subscriptionId) {
+            return res
+              .status(400)
+              .json({ success: false, message: "Invalid user or subscription ID" });
+          }
+          
+          // If we have the userSubscription, include it in the response
+          // This will be used to display subscription details in the success message
+          const userSubscription = verificationResult.userSubscription;
+          
+          // If there's a userSubscription, enrich it with the subscription details
+          if (userSubscription) {
+            try {
+              const subscription = await storage.getSubscription(userSubscription.subscriptionId);
+              if (subscription) {
+                userSubscription.subscription = subscription;
+              }
+            } catch (err) {
+              console.error("Error fetching subscription details:", err);
+            }
+          }
+
+          // Return success response with enriched data
+          return res.status(200).json({
+            success: true,
+            verified: true,
+            userId,
+            subscriptionId,
+            userSubscription,
+            message: "Payment verified successfully",
+          });
+        } else if (verificationResult.pending) {
+          // Payment is still processing
+          return res.status(202).json({
+            success: false,
+            verified: false,
+            pending: true,
+            sessionStatus: verificationResult.sessionStatus,
+            message: "Payment is still processing",
+          });
+        } else {
+          // Payment failed
+          return res.status(400).json({
+            success: false,
+            verified: false,
+            sessionStatus: verificationResult.sessionStatus,
+            message: "Payment verification failed",
+          });
+        }
+      } catch (error) {
+        console.error("Error verifying payment session:", error);
+        return res.status(500).json({
+          success: false,
+          message: "Internal server error during payment verification",
+        });
+      }
+    }
+  );
+  // Verify payment success (path param version - keep for backward compatibility)
+  app.get(
+    "/api/subscriptions/verify-payment/:sessionId",
+    isAuthenticated,
+    async (req, res) => {
+      try {
+        const { sessionId } = req.params;
+
+        // Verify payment session
+        const verificationResult = await verifyPaymentSession(sessionId);
+
+        if (verificationResult.verified) {
+          const userId = parseInt(verificationResult.userId || "0");
+          const subscriptionId = parseInt(
+            verificationResult.subscriptionId || "0",
+          );
+
+          if (!userId || !subscriptionId) {
+            return res
+              .status(400)
+              .json({ success: false, message: "Invalid user or subscription ID" });
+          }
+          
+          // If we have the userSubscription, include it in the response
+          const userSubscription = verificationResult.userSubscription;
+          
+          // If there's a userSubscription, enrich it with subscription details
+          if (userSubscription) {
+            try {
+              const subscription = await storage.getSubscription(userSubscription.subscriptionId);
+              if (subscription) {
+                userSubscription.subscription = subscription;
+              }
+            } catch (err) {
+              console.error("Error fetching subscription details:", err);
+            }
+          }
+
+          // Return success response with enriched data
+          return res.status(200).json({
+            success: true,
+            verified: true,
+            userId,
+            subscriptionId,
+            userSubscription,
+            message: "Payment verified successfully",
+          });
+        } else if (verificationResult.pending) {
+          // Payment is still processing
+          return res.status(202).json({
+            success: false,
+            verified: false,
+            pending: true,
+            sessionStatus: verificationResult.sessionStatus,
+            message: "Payment is still processing",
+          });
+        } else {
+          // Payment failed
+          return res.status(400).json({
+            success: false,
+            verified: false,
+            sessionStatus: verificationResult.sessionStatus,
+            message: "Payment verification failed",
+          });
+        }
+      } catch (error) {
+        console.error("Error verifying payment:", error);
+        res.status(500).json({ message: "Failed to verify payment" });
+      }
+    },
+  );
+
+  // Payment verification endpoint
+  app.get(
+    "/api/payment/verify-session/:sessionId",
+    isAuthenticated,
+    async (req, res) => {
+      try {
+        const { sessionId } = req.params;
+
+        if (!sessionId) {
+          return res.status(400).json({ message: "Session ID is required" });
+        }
+
+        console.log("Verifying payment session:", sessionId);
+
+        // Verify payment session
+        const verificationResult = await verifyPaymentSession(sessionId);
+
+        console.log("Verification result:", {
+          verified: verificationResult.verified,
+          userId: verificationResult.userId,
+          subscriptionId: verificationResult.subscriptionId,
+          userSubscription: verificationResult.userSubscription ? true : false,
+        });
+
+        res.json({
+          success: true,
+          verified: verificationResult.verified,
+          userSubscription: verificationResult.userSubscription,
+        });
+      } catch (error) {
+        console.error("Payment verification error:", error);
+        res.status(500).json({
+          message: "Failed to verify payment session",
+          error: error.message,
+        });
+      }
+    },
+  );
+
+  // Stripe webhook handler
+  app.post(
+    "/api/stripe-webhook",
+    express.raw({ type: "application/json" }),
+    async (req, res) => {
+      try {
+        const signature = req.headers["stripe-signature"] as string;
+
+        if (!signature) {
+          console.error("No Stripe signature found in webhook request");
+          return res.status(400).send("No Stripe signature found");
+        }
+
+        console.log(
+          "Received Stripe webhook with signature:",
+          signature.substring(0, 20) + "...",
+        );
+        console.log(
+          "Webhook payload size:",
+          Buffer.isBuffer(req.body) ? req.body.length : "Not a buffer",
+        );
+
+        // Validate that we actually received the raw body
+        if (!Buffer.isBuffer(req.body)) {
+          console.error(
+            "Webhook payload is not a buffer. Make sure express.raw() middleware is properly configured.",
+          );
+          return res.status(400).send("Invalid webhook payload format");
+        }
+
+        // Process webhook event
+        const event = await processStripeWebhook(signature, req.body);
+
+        if (!event) {
+          console.error("Failed to process webhook event");
+          return res.status(400).send("Failed to process webhook event");
+        }
+
+        console.log("Webhook validated successfully");
+
+        console.log(`Processing webhook event of type: ${event.type}`);
+
+        // Handle different event types
+        if (event.type === "checkout.session.completed") {
+          // Payment was successful
+          const session = event.data.object;
+          console.log("Session data:", {
+            id: session.id,
+            paymentStatus: session.payment_status,
+            customer: session.customer,
+            metadata: session.metadata,
+            paymentType: session.metadata?.paymentType || 'unknown'
+          });
+
+          if (session.metadata && session.metadata.userId) {
+            const userId = parseInt(session.metadata.userId);
+            const subscriptionId = parseInt(
+              session.metadata.subscriptionId || "0",
+            );
+
+            console.log(
+              `Processing payment for user ${userId} and subscription ${subscriptionId}`,
+            );
+
+            try {
+              if (userId && subscriptionId) {
+                // Get user subscription by session ID
+                const userSubscription =
+                  await storage.getUserSubscriptionByPaymentSession(session.id);
+
+                if (userSubscription) {
+                  console.log(
+                    `Found user subscription with ID ${userSubscription.id}`,
+                  );
+
+                  // Make sure it's not already activated
+                  if (
+                    userSubscription.status === "active" &&
+                    userSubscription.paymentVerified
+                  ) {
+                    console.log(
+                      `Subscription ${userSubscription.id} is already active and verified, skipping update`,
+                    );
+                    return res
+                      .status(200)
+                      .json({ received: true, status: "already_active" });
+                  }
+
+                  // Update user subscription status
+                  const updatedSubscription =
+                    await storage.updateUserSubscription(userSubscription.id, {
+                      status: "active",
+                      paymentVerified: true,
+                    });
+
+                  console.log(
+                    `Updated subscription status to active:`,
+                    updatedSubscription,
+                  );
+
+                  // Update user's lead coins based on subscription
+                  await storage.updateUserLeadCoins(
+                    userSubscription.userId,
+                    userSubscription.leadCoinsLeft,
+                  );
+
+                  console.log(
+                    `Updated user's lead coins by ${userSubscription.leadCoinsLeft}`,
+                  );
+                } else {
+                  console.log(
+                    `No user subscription found with session ID ${session.id}`,
+                  );
+
+                  // This could be a race condition where the session was created but no userSubscription was stored yet
+                  // First check if there's already a pending subscription for this plan and user
+                  console.log(`Checking for existing pending subscriptions for user ${userId} and plan ${subscriptionId}`);
+                  
+                  // Get the user's subscription history
+                  const userSubscriptionHistory = await storage.getUserSubscriptionHistory(userId);
+                  
+                  // Look for any pending subscription for this plan
+                  const pendingSubscription = userSubscriptionHistory.find(
+                    sub => sub.subscriptionId === subscriptionId && sub.status === "pending"
+                  );
+                  
+                  if (pendingSubscription) {
+                    // There's a pending subscription - update it to active
+                    console.log(`Found pending subscription ${pendingSubscription.id} - updating to active status`);
+                    
+                    const updatedSubscription = await storage.updateUserSubscription(pendingSubscription.id, {
+                      status: "active",
+                      paymentVerified: true,
+                      paymentSessionId: session.id, // Update with the new session ID
+                    });
+                    
+                    console.log(`Updated subscription status:`, updatedSubscription);
+                    
+                    // Get subscription details
+                    const subscription = await storage.getSubscription(subscriptionId);
+                    if (subscription && subscription.leadCoins) {
+                      // Update user's lead coins
+                      await storage.updateUserLeadCoins(userId, subscription.leadCoins);
+                      console.log(`Updated user's lead coins by ${subscription.leadCoins}`);
+                    }
+                  } else {
+                    // No pending subscription found, we need to create a new one as a last resort
+                    console.log(`No pending subscription found - creating new subscription as fallback`);
+                    
+                    // Get subscription details
+                    const subscription = await storage.getSubscription(subscriptionId);
+                    if (!subscription) {
+                      console.error(`Subscription ${subscriptionId} not found`);
+                      return res
+                        .status(400)
+                        .json({ error: "Subscription not found" });
+                    }
+
+                    // Create a new user subscription since one wasn't found
+                    const newUserSubscription = await storage.createUserSubscription({
+                      userId,
+                      subscriptionId,
+                      status: "active",
+                      startDate: new Date(),
+                      endDate: new Date(
+                        Date.now() + subscription.durationDays * 24 * 60 * 60 * 1000,
+                      ),
+                      paymentSessionId: session.id,
+                      paymentVerified: true,
+                      initialLeadCoins: subscription.leadCoins,
+                      leadCoinsLeft: subscription.leadCoins,
+                    });
+
+                    console.log(
+                      `Created new user subscription:`,
+                      newUserSubscription
+                    );
+
+                    // Update user's lead coins
+                    await storage.updateUserLeadCoins(
+                      userId,
+                      subscription.leadCoins
+                    );
+                    console.log(
+                      `Updated user's lead coins by ${subscription.leadCoins}`
+                    );
+                }
+              }
+            } catch (error) {
+              // Log any errors during processing
+              console.error(`Error processing subscription payment:`, error);
+              return res.status(500).json({
+                error: "Failed to process subscription payment",
+                details: error.message ? error.message : "Unknown error",
+              });
+            }
+          } else {
+            console.log("Session metadata missing userId:", session.metadata);
+          }
+        } else {
+          console.log(`Unhandled event type: ${event.type}`);
+        }
+
+        // Respond with 200 status for successful processing
+        res.status(200).json({
+          received: true,
+          success: true,
+          event_type: event.type,
+        });
+      } catch (error) {
+        console.error("Error processing webhook:", error);
+        console.error(error.stack); // Log the full stack trace for debugging
+
+        // Add structured error response with more context
+        return res.status(400).json({
+          received: true,
+          success: false,
+          error: error.message,
+          errorType: error.name,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    },
+  );
+
+  // Support Ticket Routes
+  app.get(
+    "/api/support",
+    isAuthenticated,
+    hasPermission("support_management"),
+    async (req, res) => {
+      try {
+        const tickets = await storage.getAllSupportTickets();
+        res.status(200).json(tickets);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch support tickets" });
+      }
+    },
+  );
+
+  app.get("/api/support/user", isAuthenticated, async (req, res) => {
+    try {
+      const userId = (req.session as any).user.id;
+
+      // Get user's support tickets
+      const tickets = await storage.getUserSupportTickets(userId);
+      res.status(200).json(tickets);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch support tickets" });
+    }
+  });
+
+  app.get("/api/support/:id", isAuthenticated, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const ticketId = parseInt(id);
+      const userId = (req.session as any).user.id;
+      const userRole = (req.session as any).user.role;
+
+      // Get ticket
+      const ticket = await storage.getSupportTicket(ticketId);
+      if (!ticket) {
+        return res.status(404).json({ message: "Support ticket not found" });
+      }
+
+      // Check if user has permission to view ticket
+      if (userRole === "user" && ticket.userId !== userId) {
+        return res
+          .status(403)
+          .json({ message: "You don't have permission to view this ticket" });
+      }
+
+      res.status(200).json(ticket);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch support ticket" });
+    }
+  });
+
+  app.post("/api/support", isAuthenticated, async (req, res) => {
+    try {
+      const data = insertSupportTicketSchema.parse(req.body);
+      const userId = (req.session as any).user.id;
+
+      // Create support ticket
+      const ticket = await storage.createSupportTicket({
+        ...data,
+        userId,
+      });
+
+      res.status(201).json(ticket);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: error.errors[0].message });
+      }
+      res.status(500).json({ message: "Failed to create support ticket" });
+    }
+  });
+
+  app.get("/api/support/:id/replies", isAuthenticated, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const ticketId = parseInt(id);
+      const userId = (req.session as any).user.id;
+      const userRole = (req.session as any).user.role;
+
+      // Get ticket
+      const ticket = await storage.getSupportTicket(ticketId);
+      if (!ticket) {
+        return res.status(404).json({ message: "Support ticket not found" });
+      }
+
+      // Check if user has permission to view ticket replies
+      if (userRole === "user" && ticket.userId !== userId) {
+        return res
+          .status(403)
+          .json({ message: "You don't have permission to view this ticket" });
+      }
+
+      // Get ticket replies
+      const replies = await storage.getSupportTicketReplies(ticketId);
+
+      res.status(200).json(replies);
+    } catch (error) {
+      res
+        .status(500)
+        .json({ message: "Failed to fetch support ticket replies" });
+    }
+  });
+
+  app.post("/api/support/:id/reply", isAuthenticated, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const ticketId = parseInt(id);
+      const userId = (req.session as any).user.id;
+      const userRole = (req.session as any).user.role;
+
+      // Get ticket
+      const ticket = await storage.getSupportTicket(ticketId);
+      if (!ticket) {
+        return res.status(404).json({ message: "Support ticket not found" });
+      }
+
+      // Check if user has permission to reply to ticket
+      if (userRole === "user" && ticket.userId !== userId) {
+        return res.status(403).json({
+          message: "You don't have permission to reply to this ticket",
+        });
+      }
+
+      // Create ticket reply
+      const reply = await storage.createSupportTicketReply({
+        ticketId,
+        userId,
+        message: req.body.message,
+        isFromStaff: userRole !== "user", // Staff replies are from admin or subadmin
+      });
+
+      // If it's a support agent (admin or subadmin) replying, update ticket status to in_progress
+      if (userRole !== "user" && ticket.status === "open") {
+        await storage.updateSupportTicketStatus(ticketId, "in_progress");
+      }
+
+      res.status(201).json(reply);
+    } catch (error) {
+      res
+        .status(500)
+        .json({ message: "Failed to create support ticket reply" });
+    }
+  });
+
+  app.patch(
+    "/api/support/:id/status",
+    isAuthenticated,
+    hasPermission("support_management"),
+    async (req, res) => {
+      try {
+        const { id } = req.params;
+        const ticketId = parseInt(id);
+        const { status } = req.body;
+
+        // Get ticket
+        const ticket = await storage.getSupportTicket(ticketId);
+        if (!ticket) {
+          return res.status(404).json({ message: "Support ticket not found" });
+        }
+
+        // Update ticket status
+        await storage.updateSupportTicketStatus(ticketId, status);
+
+        res
+          .status(200)
+          .json({ message: "Support ticket status updated successfully" });
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Failed to update support ticket status" });
+      }
+    },
+  );
+
+  // LeadCoin Management Routes
+  app.get(
+    "/api/leadcoins/settings",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        const settings = await storage.getLeadCoinSettings();
+        res.status(200).json(settings);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch LeadCoin settings" });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/leadcoins/settings",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        // console.log("+_+_+_+_+_", req.body);
+        const data = updateLeadCoinSettingsSchema.parse(req.body);
+        // console.log(data);
+        // Update LeadCoin settings
+        const settings = await storage.updateLeadCoinSettings(data);
+
+        res.status(200).json(settings);
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          return res.status(400).json({ message: error.errors[0].message });
+        }
+        res.status(500).json({ message: "Failed to update LeadCoin settings" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/leadcoins/stats",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        // Get all users to calculate total coins and find top users
+        const allUsers = await storage.getAllUsers();
+
+        // Calculate total coins in circulation
+        const totalCoins = allUsers.users.reduce(
+          (sum, user) => sum + (user.leadCoins || 0),
+          0,
+        );
+
+        // Get top users by lead coin balance
+        const topUsers = allUsers.users
+          .sort((a, b) => (b.leadCoins || 0) - (a.leadCoins || 0))
+          .slice(0, 5)
+          .map((user) => ({
+            name: user.name,
+            email: user.email,
+            currentBalance: user.leadCoins || 0,
+            totalSpent: 0, // We'll need to implement this calculation later
+          }));
+
+        // Get viewed leads for stats
+        const now = new Date();
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const today = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate(),
+        );
+
+        // Import viewedLeads table at the top of the file
+        // Get all viewed leads
+        const allViewedLeads = await db.select().from(viewedLeads);
+
+        // Filter for this month and today
+        const viewedLeadsThisMonth = allViewedLeads.filter(
+          (lead) => new Date(lead.viewedAt) >= monthStart,
+        );
+
+        const viewedLeadsToday = allViewedLeads.filter(
+          (lead) => new Date(lead.viewedAt) >= today,
+        );
+
+        // Get lead coin settings to calculate spent coins
+        const settings = await storage.getLeadCoinSettings();
+        const contactInfoCost = settings?.contactInfoCost || 5;
+
+        // Calculate stats
+        const coinsSpentThisMonth =
+          viewedLeadsThisMonth.length * contactInfoCost;
+        const leadsViewedToday = viewedLeadsToday.length;
+
+        // Return the stats
+        res.status(200).json({
+          totalCoins,
+          coinsSpentThisMonth,
+          leadsViewedToday,
+          topUsers,
+        });
+      } catch (error) {
+        console.error("Error fetching LeadCoin stats:", error);
+        res
+          .status(500)
+          .json({ message: "Failed to fetch LeadCoin statistics" });
+      }
+    },
+  );
+
+  // Test route for debugging session
+  app.get("/api/test-session", (req, res) => {
+    console.log("Current session in test-session route:", req.session);
+    res.status(200).json({
+      sessionExists: !!req.session,
+      userInSession: !!(req.session as any).user,
+      userDetails: (req.session as any).user
+        ? {
+            id: (req.session as any).user.id,
+            email: (req.session as any).user.email,
+            role: (req.session as any).user.role,
+          }
+        : null,
+    });
+  });
+
+  // Test route for easy admin login
+  app.post("/api/dev/login-admin", async (req, res) => {
+    try {
+      // Find admin user
+      const admin = await storage.getUserByEmail("admin@example.com");
+
+      if (!admin) {
+        return res.status(404).json({
+          message:
+            "Admin user not found. Create one first with /api/dev/create-admin",
+        });
+      }
+
+      // Save admin to session
+      (req.session as any).user = admin;
+      console.log("Admin login successful - user saved to session:", {
+        id: admin.id,
+        email: admin.email,
+        role: admin.role,
+      });
+
+      res.status(200).json({
+        message: "Admin login successful",
+        user: { ...admin, password: undefined },
+      });
+    } catch (error) {
+      console.error("Error logging in admin:", error);
+      res.status(500).json({ message: "Failed to login admin" });
+    }
+  });
+
+  // Debug/development route to create a test admin user
+  app.post("/api/dev/create-admin", async (req, res) => {
+    try {
+      console.log("Creating test admin user");
+      // Check if admin already exists
+      const existingAdmin = await storage.getUserByEmail("admin@example.com");
+
+      if (existingAdmin) {
+        console.log("Admin user already exists");
+        return res.status(200).json({
+          message: "Admin user already exists",
+          user: { ...existingAdmin, password: undefined },
+        });
+      }
+
+      // Hash password
+      const hashedPassword = await bcrypt.hash("password123", 10);
+
+      // Create admin user
+      const adminUser = await storage.createUser({
+        name: "Admin User",
+        email: "admin@example.com",
+        password: hashedPassword,
+        confirmPassword: hashedPassword,
+        role: "admin",
+        status: "active",
+        verified: true,
+      });
+
+      console.log("Admin user created successfully:", adminUser);
+
+      res.status(201).json({
+        message: "Admin user created successfully",
+        user: { ...adminUser, password: undefined },
+      });
+    } catch (error) {
+      console.error("Error creating admin user:", error);
+      res.status(500).json({ message: "Failed to create admin user" });
+    }
+  });
+
+  // Dashboard Routes
+  app.get(
+    "/api/admin/dashboard",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        console.log("Fetching admin dashboard data...");
+        console.log(
+          "Admin dashboard request from user:",
+          (req.session as any).user,
+        );
+        // Get dashboard data
+        const data = await storage.getAdminDashboardData();
+
+        console.log("Admin dashboard data fetched successfully");
+        res.status(200).json(data);
+      } catch (error) {
+        console.error("Error fetching admin dashboard data:", error);
+        res.status(500).json({
+          message: "Failed to fetch dashboard data",
+          error: error.message,
+        });
+      }
+    },
+  );
+
+  app.get(
+    "/api/subadmin/dashboard",
+    isAuthenticated,
+    hasRole(["subadmin"]),
+    async (req, res) => {
+      try {
+        const userId = (req.session as any).user.id;
+
+        // Get dashboard data - the method doesn't need a userId parameter
+        const data = await storage.getSubadminDashboardData();
+
+        res.status(200).json(data);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch dashboard data" });
+      }
+    },
+  );
+
+  /**
+   * Admin endpoint to manually trigger inactive user notifications
+   * This allows administrators to send reminder emails to users
+   * who haven't logged in for a specified number of days
+   */
+  app.post(
+    "/api/admin/notify-inactive-users",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        // Get the number of days from the request or use default (3)
+        const days = req.body.days || 3;
+
+        // Log the request
+        console.log(
+          `Admin ${(req.session as any).user.id} triggered inactive user notifications for ${days} days`,
+        );
+
+        // Run the notification process asynchronously
+        // We don't await this to prevent timeout if there are many users to process
+        notifyInactiveUsers(days)
+          .then((result) => {
+            console.log(
+              `Admin-triggered notification process completed successfully`,
+            );
+          })
+          .catch((err) => {
+            console.error(
+              `Error in admin-triggered notification process:`,
+              err,
+            );
+          });
+
+        // Return success immediately
+        res.status(200).json({
+          message: `Notification process started for users inactive for ${days} days`,
+          status: "processing",
+        });
+      } catch (error) {
+        console.error("Error triggering inactive user notifications:", error);
+        res
+          .status(500)
+          .json({ message: "Failed to trigger inactive user notifications" });
+      }
+    },
+  );
+
+  // Export data endpoints
+  
+  /**
+   * Export all leads as CSV
+   * Admin and subadmin only
+   */
+  app.get(
+    "/api/export/leads",
+    isAuthenticated,
+    hasRole(["admin", "subadmin"]),
+    async (req, res) => {
+      try {
+        // Get all leads
+        const leads = await storage.getAllLeads();
+        
+        if (!leads || leads.length === 0) {
+          return res.status(404).json({ message: "No leads found" });
+        }
+        
+        // Process leads for export by omitting sensitive or unnecessary fields
+        const processedLeads = leads.map(lead => {
+          // Create a new object with only the fields we want to export
+          const leadForExport: Record<string, any> = {
+            id: lead.id,
+            title: lead.title,
+            description: lead.description,
+            contactInfo: lead.contactInfo,
+            company: lead.company,
+            budget: lead.budget,
+            location: lead.location,
+            categoryId: lead.categoryId,
+            createdAt: lead.createdAt ? lead.createdAt.toISOString() : '',
+          }
+          
+          return leadForExport;
+        });
+        
+        // Convert to CSV
+        const csv = convertToCSV(processedLeads);
+        
+        // Set headers for file download
+        res.setHeader('Content-Disposition', 'attachment; filename=leads.csv');
+        res.setHeader('Content-Type', 'text/csv');
+        
+        // Send CSV data
+        res.status(200).send(csv);
+        
+      } catch (error) {
+        console.error("Error exporting leads:", error);
+        res.status(500).json({ message: "Failed to export leads" });
+      }
+    }
+  );
+  
+  /**
+   * Export users as CSV
+   * Admin only
+   */
+  app.get(
+    "/api/export/users",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        // Get all users (using the getAllUsers method that returns paginated results)
+        const { users } = await storage.getAllUsers();
+        
+        if (!users || users.length === 0) {
+          return res.status(404).json({ message: "No users found" });
+        }
+        
+        // Process users for export by omitting sensitive data
+        const processedUsers = users.map(user => {
+          // Create a new object with only the fields we want to export
+          const userForExport: Record<string, any> = {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            status: user.status,
+            verified: user.verified,
+            leadCoins: user.leadCoins,
+            createdAt: user.createdAt ? user.createdAt.toISOString() : '',
+            lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : ''
+          };
+          
+          // Add any custom fields or transformations here
+          
+          return userForExport;
+        });
+        
+        // Convert to CSV
+        const csv = convertToCSV(processedUsers);
+        
+        // Set headers for file download
+        res.setHeader('Content-Disposition', 'attachment; filename=users.csv');
+        res.setHeader('Content-Type', 'text/csv');
+        
+        // Send CSV data
+        res.status(200).send(csv);
+        
+      } catch (error) {
+        console.error("Error exporting users:", error);
+        res.status(500).json({ message: "Failed to export users" });
+      }
+    }
+  );
+  
+  /**
+   * Export user subscriptions as CSV
+   * Admin only
+   */
+  app.get(
+    "/api/export/subscriptions",
+    isAuthenticated,
+    hasRole(["admin"]),
+    async (req, res) => {
+      try {
+        // Get all subscriptions
+        const subscriptions = await storage.getAllSubscriptions();
+        
+        if (!subscriptions || subscriptions.length === 0) {
+          return res.status(404).json({ message: "No subscriptions found" });
+        }
+        
+        // Process subscriptions for export
+        const processedSubscriptions = subscriptions.map(subscription => {
+          // Create a new object with only the fields we want to export
+          const subscriptionForExport: Record<string, any> = {
+            id: subscription.id,
+            name: subscription.name,
+            description: subscription.description,
+            price: subscription.price,
+            leadCoins: subscription.leadCoins,
+            durationDays: subscription.durationDays,
+            active: subscription.active,
+            features: subscription.features,
+            createdAt: subscription.createdAt ? subscription.createdAt.toISOString() : '',
+          }
+          
+          return subscriptionForExport;
+        });
+        
+        // Convert to CSV
+        const csv = convertToCSV(processedSubscriptions);
+        
+        // Set headers for file download
+        res.setHeader('Content-Disposition', 'attachment; filename=subscriptions.csv');
+        res.setHeader('Content-Type', 'text/csv');
+        
+        // Send CSV data
+        res.status(200).send(csv);
+        
+      } catch (error) {
+        console.error("Error exporting subscriptions:", error);
+        res.status(500).json({ message: "Failed to export subscriptions" });
+      }
+    }
+  );
+
+  return httpServer;
+}

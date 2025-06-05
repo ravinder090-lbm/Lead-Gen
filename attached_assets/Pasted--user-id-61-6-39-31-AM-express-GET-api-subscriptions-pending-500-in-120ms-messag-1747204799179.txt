@@ -1,0 +1,35 @@
+:"/"},"user":{"id":61}}
+6:39:31 AM [express] GET /api/subscriptions/pending 500 in 120ms :: {"message":"Failed to fetch pend…
+Error creating payment session: error: column "initial_lead_coins" does not exist
+    at file:///home/runner/workspace/node_modules/@neondatabase/serverless/index.mjs:1345:74
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async NeonPreparedQuery.execute (/home/runner/workspace/node_modules/src/neon-serverless/session.ts:102:18)
+    at async DatabaseStorage.checkAndUpdateExpiredSubscriptions (/home/runner/workspace/server/storage.ts:689:34)
+    at async DatabaseStorage.getUserActiveSubscription (/home/runner/workspace/server/storage.ts:668:5)
+    at async DatabaseStorage.createUserSubscription (/home/runner/workspace/server/storage.ts:802:32)
+    at async createSubscriptionPaymentSession (/home/runner/workspace/server/stripe-service.ts:75:5)
+    at async <anonymous> (/home/runner/workspace/server/routes.ts:1859:32) {
+  length: 118,
+  severity: 'ERROR',
+  code: '42703',
+  detail: undefined,
+  hint: undefined,
+  position: '99',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'parse_relation.c',
+  line: '3722',
+  routine: 'errorMissingColumn'
+}
+Error creating payment session: Error: Failed to create payment session
+    at createSubscriptionPaymentSession (/home/runner/workspace/server/stripe-service.ts:97:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async <anonymous> (/home/runner/workspace/server/routes.ts:1859:32)
+Session after POST /api/subscriptions/purchase: {"id":"MIfhAle4isEozkjCFD3zTlX-Hhaciqx7","cookie":{"originalMaxAge":604800000,"expires":"2025-05-21T06:39:29.225Z","secure":false,"httpOnly":true,"path":"/"},"user":{"id":61}}
+6:39:32 AM [express] POST /api/subscriptions/purchase 500 in 921ms :: {"message":"Failed to create p…

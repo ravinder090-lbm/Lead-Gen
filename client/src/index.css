@@ -1,0 +1,528 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+      --background: 210 50% 98%;
+--foreground: 214 80% 20%;
+--muted: 210 40% 93%;
+--muted-foreground: 214 40% 40%;
+--popover: 210 50% 98%;
+--popover-foreground: 214 80% 20%;
+--card: 210 50% 98%;
+--card-foreground: 214 80% 20%;
+--border: 214 60% 85%;
+--input: 214 60% 90%;
+--primary: 214 90% 50%;
+--primary-foreground: 210 100% 99%;
+--secondary: 214 65% 93%;
+--secondary-foreground: 214 70% 40%;
+--accent: 214 90% 95%;
+--accent-foreground: 214 90% 40%;
+--destructive: 0 84.2% 60.2%;
+--destructive-foreground: 60 9.1% 97.8%;
+--ring: 214 90% 70%;
+--radius: 0.5rem;
+  }
+  .dark {
+      --background: 214 50% 10%;
+--foreground: 214 20% 98%;
+--muted: 214 40% 20%;
+--muted-foreground: 214 20% 80%;
+--popover: 214 50% 10%;
+--popover-foreground: 214 20% 98%;
+--card: 214 50% 13%;
+--card-foreground: 214 20% 98%;
+--border: 214 40% 25%;
+--input: 214 40% 25%;
+--primary: 214 90% 50%;
+--primary-foreground: 210 100% 99%;
+--secondary: 214 50% 15%;
+--secondary-foreground: 214 20% 90%;
+--accent: 214 50% 20%;
+--accent-foreground: 214 20% 98%;
+--destructive: 0 62.8% 40%;
+--destructive-foreground: 0 0% 98%;
+--ring: 214 40% 40%;
+--radius: 0.5rem;
+  }
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+/* Custom styles for gradient backgrounds and animations */
+.auth-gradient-bg {
+  @apply bg-gradient-to-br from-blue-500 to-blue-700;
+  background-size: 400% 400%;
+  animation: gradientAnimation 15s ease infinite;
+}
+
+.auth-split-layout {
+  @apply flex flex-col sm:flex-row w-full max-w-5xl rounded-xl overflow-hidden shadow-2xl;
+}
+
+.auth-left-panel {
+  @apply bg-blue-600/90 backdrop-blur-sm text-white p-10 flex flex-col justify-center items-center sm:w-2/5;
+}
+
+.auth-right-panel {
+  @apply bg-white p-8 sm:w-3/5;
+}
+
+.auth-title {
+  @apply text-3xl font-bold mb-2;
+}
+
+.auth-subtitle {
+  @apply text-lg opacity-90 mb-8;
+}
+
+.dashboard-gradient-bg {
+  @apply bg-gradient-to-br from-blue-50 to-sky-100;
+  background-size: 200% 200%;
+  animation: gradientAnimation 25s ease infinite;
+}
+
+.card-hover-effect {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card-hover-effect:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 10px 25px -5px rgba(59, 130, 246, 0.4);
+}
+
+.text-gradient {
+  @apply bg-gradient-to-r from-blue-600 to-blue-400 bg-clip-text text-transparent;
+}
+
+.heading-gradient {
+  @apply font-bold bg-gradient-to-r from-blue-700 to-blue-500 bg-clip-text text-transparent;
+}
+
+.blue-glass-card {
+  @apply bg-blue-50 bg-opacity-90 backdrop-blur-sm border border-blue-100;
+}
+
+.sky-glass-card {
+  @apply bg-sky-50 bg-opacity-70 backdrop-blur-sm border border-sky-100 shadow-md;
+}
+
+.dashboard-card {
+  @apply bg-white bg-opacity-80 backdrop-blur-sm border border-blue-100 shadow-md rounded-xl overflow-hidden hover:shadow-lg transition-all duration-300;
+}
+
+.dark .blue-glass-card {
+  @apply bg-blue-900 bg-opacity-20 border-blue-800;
+}
+
+.dark .sky-glass-card {
+  @apply bg-blue-900 bg-opacity-10 border-blue-800;
+}
+
+.dark .dashboard-card {
+  @apply bg-slate-800 bg-opacity-70 border-blue-900;
+}
+
+/* Custom Button Styles */
+.btn-blue-gradient {
+  @apply bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 transition-all duration-300 shadow-md hover:shadow-lg;
+}
+
+.btn-sky-outline {
+  @apply border-2 border-sky-400 text-blue-600 hover:bg-sky-50 transition-all duration-300;
+}
+
+/* Form Styles */
+.form-container {
+  @apply bg-white/95 backdrop-blur-sm rounded-xl p-6 shadow-xl border border-blue-100;
+}
+
+.form-field {
+  @apply mb-5;
+}
+
+.form-label {
+  @apply text-blue-800 font-medium text-sm mb-1.5 block;
+}
+
+.form-input {
+  @apply bg-blue-50 border border-blue-200 text-blue-900 placeholder:text-blue-400 h-11 shadow-sm rounded-md w-full px-3 
+  focus:ring-2 focus:ring-blue-300 focus:border-blue-300 transition-all duration-200;
+}
+
+.form-message {
+  @apply text-red-500 font-medium text-xs mt-1;
+}
+
+.form-button {
+  @apply w-full h-11 bg-blue-600 hover:bg-blue-700 text-white font-medium transition-all duration-300 shadow-lg
+  hover:shadow-xl rounded-md flex items-center justify-center space-x-2 mt-2;
+}
+
+.form-link {
+  @apply text-blue-600 font-medium hover:text-blue-800 underline underline-offset-2;
+}
+
+/* Animation keyframes */
+@keyframes gradientAnimation {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.pulse-animation {
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.slide-in-animation {
+  animation: slideIn 0.5s ease-out forwards;
+}
+
+@keyframes slideIn {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Shadow utility classes */
+.shadow-blue-sm {
+  box-shadow: 0 1px 2px rgba(30, 58, 138, 0.1);
+}
+
+.shadow-blue-md {
+  box-shadow: 0 4px 6px -1px rgba(30, 58, 138, 0.1), 0 2px 4px -1px rgba(30, 58, 138, 0.06);
+}
+
+.shadow-blue-lg {
+  box-shadow: 0 10px 15px -3px rgba(30, 58, 138, 0.1), 0 4px 6px -2px rgba(30, 58, 138, 0.05);
+}
+
+/* Custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(219, 234, 254, 0.3);
+  border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(59, 130, 246, 0.3);
+  border-radius: 10px;
+  transition: background-color 0.3s ease;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(59, 130, 246, 0.5);
+}
+
+/* Horizontal scrollbar styles for tables */
+.custom-scrollbar-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.custom-scrollbar-x::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.custom-scrollbar-x::-webkit-scrollbar-track {
+  background: rgba(219, 234, 254, 0.3);
+  border-radius: 10px;
+}
+
+.custom-scrollbar-x::-webkit-scrollbar-thumb {
+  background: rgba(59, 130, 246, 0.3);
+  border-radius: 10px;
+}
+
+.custom-scrollbar-x::-webkit-scrollbar-thumb:hover {
+  background: rgba(59, 130, 246, 0.5);
+}
+
+/* Responsive fixes */
+@media (max-width: 768px) {
+  .dashboard-card {
+    @apply p-3 sm:p-4;
+  }
+  
+  .form-container {
+    @apply px-3 py-4 sm:px-4 sm:py-5;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply break-words;
+  }
+  
+  /* Make sure all flex containers wrap on small screens */
+  .flex {
+    @apply flex-wrap;
+  }
+
+  /* Override for specific cases where flex shouldn't wrap */
+  .flex-nowrap-important {
+    @apply flex-nowrap !important;
+  }
+  
+  /* Text size adjustments */
+  h1 {
+    @apply text-lg sm:text-xl md:text-2xl lg:text-3xl;
+  }
+  
+  h2 {
+    @apply text-base sm:text-lg md:text-xl lg:text-2xl;
+  }
+  
+  h3 {
+    @apply text-sm sm:text-base md:text-lg lg:text-xl;
+  }
+  
+  /* Prevent text overflow */
+  p, span, div {
+    @apply break-words max-w-full;
+  }
+}
+
+/* Make content area have custom scrollbar on all pages */
+main {
+  @apply custom-scrollbar;
+}
+
+/* Fix mobile padding */
+.mobile-bottom-padding {
+  padding-bottom: env(safe-area-inset-bottom, 1rem);
+}
+
+/* Improved responsiveness for cards and grids */
+.responsive-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.responsive-grid-small {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+/* Mobile optimized grids */
+.responsive-grid-mobile {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+@media (min-width: 640px) {
+  .responsive-grid-mobile {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .responsive-grid-mobile {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (min-width: 1280px) {
+  .responsive-grid-mobile {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+/* Component specific responsive adjustments */
+.table-container {
+  @apply w-full overflow-x-auto custom-scrollbar-x rounded-md;
+}
+
+.mobile-card {
+  @apply p-3 sm:p-4 md:p-5 rounded-lg;
+}
+
+.mobile-stack {
+  @apply flex flex-col sm:flex-row gap-2 sm:gap-4;
+}
+
+.mobile-hide {
+  @apply hidden sm:block;
+}
+
+.mobile-only {
+  @apply block sm:hidden;
+}
+
+/* Fix height issues on mobile devices */
+@media (max-height: 600px) {
+  .sidebar-menu {
+    max-height: 60vh;
+    overflow-y: auto;
+    @apply custom-scrollbar;
+  }
+}
+
+/* Better touch targets for mobile */
+.touch-target {
+  @apply min-h-[44px] min-w-[44px];
+}
+
+/* Safe area padding for mobile */
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.safe-area-top {
+  padding-top: env(safe-area-inset-top, 0);
+}
+
+/* Additional responsive utilities */
+.mobile-text-xs {
+  @apply text-[10px] xs:text-xs sm:text-sm;
+}
+
+.mobile-text-sm {
+  @apply text-xs xs:text-sm sm:text-base;
+}
+
+.mobile-text-base {
+  @apply text-sm xs:text-base sm:text-lg;
+}
+
+.mobile-p {
+  @apply p-2 xs:p-3 sm:p-4 md:p-5;
+}
+
+.mobile-px {
+  @apply px-2 xs:px-3 sm:px-4 md:px-5;
+}
+
+.mobile-py {
+  @apply py-2 xs:py-3 sm:py-4 md:py-5;
+}
+
+.mobile-m {
+  @apply m-1 xs:m-2 sm:m-3 md:m-4;
+}
+
+.mobile-mx {
+  @apply mx-1 xs:mx-2 sm:mx-3 md:mx-4;
+}
+
+.mobile-my {
+  @apply my-1 xs:my-2 sm:my-3 md:my-4;
+}
+
+.mobile-gap {
+  @apply gap-1 xs:gap-2 sm:gap-3 md:gap-4;
+}
+
+.mobile-space-x {
+  @apply space-x-1 xs:space-x-2 sm:space-x-3 md:space-x-4;
+}
+
+.mobile-space-y {
+  @apply space-y-1 xs:space-y-2 sm:space-y-3 md:space-y-4;
+}
+
+/* Fix for specific component types */
+.table-responsive {
+  @apply w-full overflow-x-auto block;
+}
+
+.card-responsive {
+  @apply w-full sm:w-auto overflow-hidden break-words;
+}
+
+.image-responsive {
+  @apply max-w-full h-auto object-contain;
+}
+
+/* Extra small screen handling (below 375px) */
+@media (max-width: 374px) {
+  .xs-hidden {
+    @apply hidden;
+  }
+  
+  .xs-text-smaller {
+    font-size: 0.7rem;
+  }
+  
+  .xs-compact {
+    @apply p-1 m-1 gap-1;
+  }
+}
+
+.page_loader {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  z-index: 999;
+  background-color: #000000d6;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+.loader {
+  width: 60px;
+  height: 60px;
+  --c: no-repeat linear-gradient(#2563eb 0 0); /* Your custom blue color */
+  background: var(--c), var(--c), var(--c), var(--c);
+  background-size: 35px 35px;
+  animation: l5 1.5s infinite cubic-bezier(0.3, 1, 0, 1);
+}
+
+@keyframes l5 {
+  0% {
+    background-position: 0 0, 100% 0, 100% 100%, 0 100%;
+  }
+  33% {
+    background-position: 0 0, 100% 0, 100% 100%, 0 100%;
+    width: 80px;
+    height: 80px;
+  }
+  66% {
+    background-position: 100% 0, 100% 100%, 0 100%, 0 0;
+    width: 80px;
+    height: 80px;
+  }
+  100% {
+    background-position: 100% 0, 100% 100%, 0 100%, 0 0;
+  }
+}

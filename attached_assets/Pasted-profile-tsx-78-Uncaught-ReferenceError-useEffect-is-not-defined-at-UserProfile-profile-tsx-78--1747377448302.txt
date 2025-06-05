@@ -1,0 +1,24 @@
+profile.tsx:78 Uncaught ReferenceError: useEffect is not defined
+    at UserProfile (profile.tsx:78:3)
+
+profile.tsx:78 Uncaught ReferenceError: useEffect is not defined
+    at UserProfile (profile.tsx:78:3)
+chunk-RPCDYKBN.js?v=400d405d:14032 The above error occurred in the <UserProfile> component:
+
+    at UserProfile (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.dev/src/pages/user/profile.tsx:57:33)
+    at Route (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.d…/home/runner/workspace/node_modules/.vite/deps/wouter.js?v=400d405d:129:16)
+    at Switch (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.d…/home/runner/workspace/node_modules/.vite/deps/wouter.js?v=400d405d:185:17)
+    at AppRoutes (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.dev/src/App.tsx?v=iRiDp4oe4lFN7KJG_YEkD:99:31)
+    at Suspense
+    at Router (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.d…s/home/runner/workspace/node_modules/.vite/deps/wouter.js?v=400d405d:97:17)
+    at AuthProvider (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.dev/src/contexts/auth-context.tsx:49:32)
+    at Provider (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.d…unner/workspace/node_modules/.vite/deps/chunk-OXZDJRWN.js?v=400d405d:38:15)
+    at TooltipProvider (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.d…rkspace/node_modules/.vite/deps/@radix-ui_react-tooltip.js?v=400d405d:62:5)
+    at QueryClientProvider (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.d…rkspace/node_modules/.vite/deps/@tanstack_react-query.js?v=400d405d:2805:3)
+    at App
+    at Router (https://0c6b33a2-6d27-414f-8c65-c4c046e70cac-00-r5p6rx4dglg4.riker.replit.d…s/home/runner/workspace/node_modules/.vite/deps/wouter.js?v=400d405d:97:17)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+chunk-RPCDYKBN.js?v=400d405d:9129 Uncaught ReferenceError: useEffect is not defined
+    at UserProfile (profile.tsx:78:3)
